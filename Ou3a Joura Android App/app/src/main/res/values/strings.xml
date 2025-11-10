@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Ou3a Joura</string>
+    <string name="notif_channel_name">Trip Recording</string>
+    <string name="notif_channel_desc">Records sensors and GPS in the background during trips.</string>
+    <string name="notif_title">Recording trip…</string>
+    <string name="notif_stop">Stop</string>
+    <string name="start">Start Trip</string>
+    <string name="stop">Stop Trip</string>
+    <string name="status_idle">Status: Idle</string>
+    <string name="status_recording">Status: Recording</string>
+</resources>
