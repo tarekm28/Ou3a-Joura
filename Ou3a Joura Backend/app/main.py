@@ -445,10 +445,7 @@ async def get_clusters(
     return filtered
 
 
-# ---------------------------------------------------------------------
-# Road roughness endpoint (unchanged)
-# ---------------------------------------------------------------------
-
+# Road roughness endpoint
 
 @app.get("/api/v1/road_quality")
 async def get_road_quality(
