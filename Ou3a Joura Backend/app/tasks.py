@@ -1,136 +1,101 @@
-import asyncio
-import json
+# app/tasks.py
+
+from typing import Any, Dict
 
 import asyncpg
-from celery import Celery
 
-from .config import DATABASE_URL, CELERY_BROKER_URL, CELERY_RESULT_BACKEND
 from .processing import process_trip_payload
 
 
-# Celery app (name "ouaa" matches your worker logs: . ouaa.process_trip)
-celery_app = Celery("ouaa", broker=CELERY_BROKER_URL, backend=CELERY_RESULT_BACKEND)
-
-
-def enqueue_process_trip(trip_id: str) -> None:
+async def run_trip_processing(
+    pool: asyncpg.Pool, trip_id: str, payload: Dict[str, Any]
+) -> None:
     """
-    Called by FastAPI after a trip is stored.
+    Process a single trip and update:
+      - detections (raw suspicious spikes)
+      - road_quality_segments (rough patches)
 
-    Just enqueue the Celery task by name.
+    Pothole clusters are computed on the fly in /api/v1/clusters.
     """
-    celery_app.send_task("ouaa.process_trip", args=[trip_id])
+    detections, _clusters_unused, segments = process_trip_payload(payload)
 
+    if pool is None:
+        return
 
-@celery_app.task(name="ouaa.process_trip")
-def process_trip(trip_id: str):
-    """
-    Celery entrypoint. Synchronous wrapper around async code.
-    """
-    asyncio.run(_run(trip_id))
-
-
-async def _run(trip_id: str):
-    """
-    1. Load raw JSON payload for this trip from trip_raw.
-    2. Run the preprocessing + pothole detection algorithm.
-    3. Store detections and aggregate clusters into pothole_clusters.
-    """
-    if not DATABASE_URL:
-        # Misconfiguration – better to fail loudly than silently.
-        raise RuntimeError("DATABASE_URL is not set")
-
-    conn = await asyncpg.connect(DATABASE_URL)
-    try:
-        row = await conn.fetchrow(
-            "SELECT payload FROM trip_raw WHERE trip_id = $1",
-            trip_id,
-        )
-        if row is None:
-            # Nothing to do – maybe trip was deleted.
-            return
-
-        payload = row["payload"]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-
-        detections, clusters = process_trip_payload(payload)
-
-        # ---------- detections ----------
-        # Clear previous detections for this trip (idempotent reprocessing)
-        await conn.execute(
-            "DELETE FROM detections WHERE trip_id = $1",
-            trip_id,
-        )
-
-        for d in detections:
-            await conn.execute(
-                """
-                INSERT INTO detections (
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # --- detections: raw per-event evidence ---
+            for d in detections:
+                await conn.execute(
+                    """
+                    INSERT INTO detections (
+                        trip_id,
+                        ts,
+                        latitude,
+                        longitude,
+                        intensity,
+                        stability,
+                        mount_state
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                    ON CONFLICT (trip_id, ts) DO NOTHING
+                    """,
                     trip_id,
-                    ts,
-                    latitude,
-                    longitude,
-                    intensity
+                    d["ts"],
+                    d.get("lat"),
+                    d.get("lon"),
+                    d.get("intensity"),
+                    d.get("stability"),
+                    d.get("mount_state"),
                 )
-                VALUES ($1, $2, $3, $4, $5)
-                """,
-                trip_id,
-                d["ts"],
-                d["lat"],
-                d["lon"],
-                d["intensity"],
-            )
 
-        # ---------- clusters ----------
-        # Each trip’s clusters are merged into global pothole_clusters.
-        for c in clusters:
-            await conn.execute(
-                """
-                INSERT INTO pothole_clusters (
-                    cluster_id,
-                    latitude,
-                    longitude,
-                    hits,
-                    users,
-                    last_ts,
-                    avg_intensity,
-                    exposure,
-                    confidence,
-                    priority
+            # --- rough road segments ---
+            for s in segments:
+                await conn.execute(
+                    """
+                    INSERT INTO road_quality_segments (
+                        segment_id,
+                        latitude,
+                        longitude,
+                        roughness,
+                        rough_windows,
+                        trips,
+                        last_ts,
+                        confidence
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,
+                        0.0  -- initial confidence, recomputed in UPDATE
+                    )
+                    ON CONFLICT (segment_id) DO UPDATE
+                    SET
+                        latitude      = EXCLUDED.latitude,
+                        longitude     = EXCLUDED.longitude,
+                        roughness     =
+                            (road_quality_segments.roughness * road_quality_segments.rough_windows
+                             + EXCLUDED.roughness * EXCLUDED.rough_windows)
+                            / NULLIF(
+                                road_quality_segments.rough_windows + EXCLUDED.rough_windows,
+                                0
+                            ),
+                        rough_windows = road_quality_segments.rough_windows + EXCLUDED.rough_windows,
+                        trips         = road_quality_segments.trips + EXCLUDED.trips,
+                        last_ts       = GREATEST(
+                            road_quality_segments.last_ts,
+                            EXCLUDED.last_ts
+                        ),
+                        confidence    = LEAST(
+                            1.0,
+                            0.5 * (road_quality_segments.trips + EXCLUDED.trips) / 3.0
+                            + 0.5 * (road_quality_segments.rough_windows + EXCLUDED.rough_windows)
+                                  / 50.0
+                        ),
+                        updated_at    = now()
+                    """,
+                    s["segment_id"],
+                    s["lat"],
+                    s["lon"],
+                    s["roughness"],
+                    s["rough_windows"],
+                    1,  # one trip contributed
+                    s["last_ts"],
                 )
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-                ON CONFLICT (cluster_id) DO UPDATE
-                SET
-                    latitude   = EXCLUDED.latitude,
-                    longitude  = EXCLUDED.longitude,
-                    -- accumulate hits/users across trips
-                    hits       = pothole_clusters.hits + EXCLUDED.hits,
-                    users      = pothole_clusters.users + EXCLUDED.users,
-                    -- keep the most recent sighting timestamp
-                    last_ts    = GREATEST(pothole_clusters.last_ts, EXCLUDED.last_ts),
-                    -- merge intensity by hit-weighted average
-                    avg_intensity =
-                        (
-                            pothole_clusters.avg_intensity * pothole_clusters.hits
-                            + EXCLUDED.avg_intensity * EXCLUDED.hits
-                        )
-                        / NULLIF(pothole_clusters.hits + EXCLUDED.hits, 0),
-                    -- exposure: placeholder add – can be refined later
-                    exposure   = pothole_clusters.exposure + EXCLUDED.exposure,
-                    -- confidence/priority recomputed by the latest run
-                    confidence = EXCLUDED.confidence,
-                    priority   = EXCLUDED.priority
-                """,
-                c["cluster_id"],
-                c["lat"],
-                c["lon"],
-                c["hits"],
-                c["users"],
-                c["last_ts"],
-                c["avg_intensity"],
-                c["exposure"],
-                c["confidence"],
-                c["priority"],
-            )
-    finally:
-        await conn.close()

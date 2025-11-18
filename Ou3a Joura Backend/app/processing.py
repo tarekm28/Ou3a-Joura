@@ -1,407 +1,376 @@
-import pandas as pd
-import numpy as np
-from sklearn.cluster import DBSCAN
-from datetime import datetime, timezone
+# app/processing.py
+
+from __future__ import annotations
+
 import hashlib
+from typing import Any, Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
 
 
-def _safe_vec(v):
+def _to_datetime_series(df: pd.DataFrame, payload: Dict[str, Any]) -> pd.Series:
     """
-    Ensure we always have a 3-vector of floats, or NaNs.
+    Build a timezone-aware timestamp column from payload + sample fields.
+    Priority:
+    - 'timestamp' field in each sample (ISO)  <-- your Android data
+    - 'ts' field if already present
+    - 't' as ms offset from payload['start_time']
+    - fallback: synthetic timestamps (20 Hz)
     """
-    if isinstance(v, (list, tuple, np.ndarray)) and len(v) == 3:
-        try:
-            return np.array(v, dtype=float)
-        except Exception:
-            pass
-    return np.array([np.nan, np.nan, np.nan], dtype=float)
+    if "timestamp" in df.columns:
+        return pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+
+    if "ts" in df.columns:
+        return pd.to_datetime(df["ts"], utc=True, errors="coerce")
+
+    start_time = payload.get("start_time")
+    if start_time is not None and "t" in df.columns:
+        base = pd.to_datetime(start_time, utc=True)
+        return base + pd.to_timedelta(df["t"].astype(float), unit="ms")
+
+    # Fallback: assume 20 Hz sampling, synthetic timestamps
+    base = pd.Timestamp.utcnow().tz_localize("UTC")
+    dt = pd.to_timedelta(1 / 20.0, unit="s")
+    return base + df.index.to_series() * dt
 
 
-def _estimate_gravity(accel_arr: np.ndarray, dt_arr: np.ndarray, tau: float = 0.5):
+def _normalize_columns(df: pd.DataFrame) -> None:
     """
-    Simple exponential smoothing to estimate gravity vector in phone frame.
+    Convert Android trip format columns to the internal format used by the
+    rest of the pipeline.
 
-    accel_arr: Nx3 array of raw accelerometer readings.
-    dt_arr:    N array of timestep lengths in seconds.
-    tau:       smoothing time constant (~0.5 s works fine).
+    Android format:
+      - timestamp (ISO)
+      - latitude, longitude
+      - speed_mps
+      - accel: [ax, ay, az]
+      - gyro:  [gx, gy, gz]
+
+    Internal format:
+      - ts (datetime)
+      - lat, lon
+      - speed
+      - ax, ay, az
+      - gx, gy, gz
     """
-    gravity = np.zeros_like(accel_arr)
-    g_prev = None
-    for i, a in enumerate(accel_arr):
-        if np.isnan(a).any():
-            gravity[i] = g_prev if g_prev is not None else np.zeros(3)
-            continue
-        dt = dt_arr[i]
-        if not np.isfinite(dt) or dt <= 0:
-            dt = tau
-        alpha = dt / (tau + dt)
-        if g_prev is None or np.isnan(g_prev).any():
-            g_prev = a
-        g_prev = alpha * a + (1.0 - alpha) * g_prev
-        gravity[i] = g_prev
-    return gravity
+    # Split accel and gyro arrays into scalar columns if present
+    if "accel" in df.columns:
+        def _accel_x(v): return float(v[0]) if isinstance(v, (list, tuple)) and len(v) >= 1 else 0.0
+        def _accel_y(v): return float(v[1]) if isinstance(v, (list, tuple)) and len(v) >= 2 else 0.0
+        def _accel_z(v): return float(v[2]) if isinstance(v, (list, tuple)) and len(v) >= 3 else 0.0
+
+        df["ax"] = df["accel"].apply(_accel_x)
+        df["ay"] = df["accel"].apply(_accel_y)
+        df["az"] = df["accel"].apply(_accel_z)
+
+    if "gyro" in df.columns:
+        def _gyro_x(v): return float(v[0]) if isinstance(v, (list, tuple)) and len(v) >= 1 else 0.0
+        def _gyro_y(v): return float(v[1]) if isinstance(v, (list, tuple)) and len(v) >= 2 else 0.0
+        def _gyro_z(v): return float(v[2]) if isinstance(v, (list, tuple)) and len(v) >= 3 else 0.0
+
+        df["gx"] = df["gyro"].apply(_gyro_x)
+        df["gy"] = df["gyro"].apply(_gyro_y)
+        df["gz"] = df["gyro"].apply(_gyro_z)
+
+    # Normalize GPS & speed names
+    if "latitude" in df.columns and "lat" not in df.columns:
+        df["lat"] = df["latitude"]
+    if "longitude" in df.columns and "lon" not in df.columns:
+        df["lon"] = df["longitude"]
+    if "speed_mps" in df.columns and "speed" not in df.columns:
+        df["speed"] = df["speed_mps"]
+
+    # Ensure numeric columns exist
+    for col in ("ax", "ay", "az", "gx", "gy", "gz", "speed"):
+        if col not in df.columns:
+            df[col] = 0.0
+    for col in ("lat", "lon"):
+        if col not in df.columns:
+            df[col] = np.nan
 
 
-def _stability_label(score: float) -> str:
+def _compute_stability(df: pd.DataFrame) -> Tuple[pd.Series, pd.Series]:
     """
-    Qualitative label for mount stability.
-    score in [0,1], 0 = very stable, 1 = very chaotic.
+    Compute a simple phone stability score and mount_state from gyro activity.
+    stability in [0,1]: 0 = rock solid, 1 = chaos.
     """
-    if not np.isfinite(score):
-        return "unknown"
-    if score < 0.25:
-        return "stable"    # very likely in holder / wedged solidly
-    if score < 0.65:
-        return "loose"     # cup holder / dashboard
-    return "handheld"      # lots of jitter
+    for col in ("gx", "gy", "gz"):
+        if col not in df.columns:
+            df[col] = 0.0
 
+    g_mag = np.sqrt(df["gx"] ** 2 + df["gy"] ** 2 + df["gz"] ** 2)
+    df["g_mag"] = g_mag
 
-def _rolling_mad(series: pd.Series, window: int, min_periods: int = 1):
-    """
-    Rolling Median Absolute Deviation (MAD), scaled to std-like units.
-    Robust against occasional spikes.
-    """
-
-    def _mad(x):
-        arr = x[~np.isnan(x)]
-        if arr.size == 0:
-            return np.nan
-        med = np.median(arr)
-        mad = np.median(np.abs(arr - med))
-        return mad * 1.4826  # scale MAD so that for a normal dist it's ~std
-
-    return series.rolling(window, min_periods=min_periods).apply(_mad, raw=False)
-
-
-def _to_dt(s):  # ISO8601 → pandas datetime (timezone-aware UTC)
-    return pd.to_datetime(s, utc=True, errors="coerce")
-
-
-def process_trip_payload(payload: dict):
-    """
-    Input:  payload (parsed JSON from the app)
-    Output: (detections, clusters)
-
-      detections: list of per-event dicts
-        {
-          ts,            # datetime (tz-aware UTC)
-          lat, lon,      # floats or None
-          intensity,     # float (z-score)
-          stability,     # float in [0,1]
-          mount_state    # "stable" | "loose" | "handheld" | "unknown"
-        }
-
-      clusters:   list of clustered pothole dicts
-        {
-          cluster_id,
-          lat, lon,
-          hits, users,
-          last_ts,
-          avg_intensity,
-          avg_stability,
-          mount_state_counts,
-          exposure,
-          confidence,
-          priority,
-        }
-    """
-    samples = payload.get("samples", [])
-    if not samples:
-        return [], []
-
-    df = pd.DataFrame(samples)
-
-    # Need timestamps + accel
-    if "timestamp" not in df.columns or "accel" not in df.columns:
-        return [], []
-
-    # If gyro missing, fill with NaNs so code still works
-    if "gyro" not in df.columns:
-        df["gyro"] = [[np.nan, np.nan, np.nan]] * len(df)
-
-    # Sort by time & parse timestamps
-    df = df.sort_values("timestamp").reset_index(drop=True)
-    df["ts"] = df["timestamp"].apply(_to_dt)
-    if df["ts"].isna().all():
-        return [], []
-
-    # Flatten sensor arrays
-    accel_arr = np.vstack(df["accel"].apply(_safe_vec).to_numpy())
-    gyro_arr = np.vstack(df["gyro"].apply(_safe_vec).to_numpy())
-
-    # Geospatial info
-    df["lat"] = df.get("latitude")
-    df["lon"] = df.get("longitude")
-
-    # Speed (m/s) if available
-    if "speed_mps" in df.columns:
-        df["speed_mps"] = pd.to_numeric(df["speed_mps"], errors="coerce")
-    else:
-        df["speed_mps"] = np.nan
-
-    # Magnitudes
-    accel_mag = np.linalg.norm(accel_arr, axis=1)
-    gyro_mag = np.linalg.norm(gyro_arr, axis=1)
-    df["gyro_mag"] = gyro_mag
-
-    # Estimate dt between samples
-    dt = df["ts"].diff().dt.total_seconds().to_numpy()
-    if not np.isfinite(dt).any():
-        dt = np.zeros_like(accel_mag)
-    median_dt = np.nanmedian(dt[np.isfinite(dt) & (dt > 0)])
-    if not np.isfinite(median_dt):
-        median_dt = 0.01  # ~100 Hz fallback
-    dt = np.where(np.isfinite(dt) & (dt > 0), dt, median_dt)
-
-    # Gravity estimation + gravity-removed acceleration
-    gravity = _estimate_gravity(accel_arr, dt)
-    lin_accel = accel_arr - gravity
-    lin_accel_mag = np.linalg.norm(lin_accel, axis=1)
-    df["accel_mag"] = accel_mag
-    df["lin_accel_mag"] = lin_accel_mag
-
-    # Robust rolling baseline using median + MAD
-    window = 10  # ~0.5–1s depending on sample rate
-    roll_med = df["lin_accel_mag"].rolling(window, min_periods=5).median()
-    roll_mad = _rolling_mad(df["lin_accel_mag"], window, min_periods=5)
-    z = (df["lin_accel_mag"] - roll_med) / (roll_mad.replace(0, np.nan))
-    z = z.replace([np.inf, -np.inf], np.nan)
-    df["z"] = z
-
-    # ---------- phone stability classifier ----------
-    # Gravity direction jitter (orientation) + high-frequency shake (noise).
-    g_norm = np.linalg.norm(gravity, axis=1)
-    g_norm[g_norm == 0] = np.nan
-    g_unit = gravity / g_norm[:, None]
-
-    lin_df = pd.DataFrame(lin_accel, columns=["ax", "ay", "az"])
-    # Simple "high-pass": subtract local mean
-    hp = lin_df - lin_df.rolling(10, min_periods=1, center=True).mean()
-    hf_mag = np.sqrt((hp**2).sum(axis=1))
-
-    # Group into 1-second windows
-    df["window_start"] = df["ts"].dt.floor("s")
-
-    window_metrics = []
-    for w_start, idxs in df.groupby("window_start").groups.items():
-        if pd.isna(w_start):
-            continue
-        idx_list = list(idxs)
-
-        # Orientation jitter (std of angle between gravity vectors)
-        g_window = g_unit[idx_list]
-        valid_g = g_window[~np.isnan(g_window).any(axis=1)]
-        if valid_g.size == 0:
-            jitter = 0.0
-        else:
-            mean_dir = np.nanmean(valid_g, axis=0)
-            norm = np.linalg.norm(mean_dir)
-            if norm == 0 or not np.isfinite(norm):
-                jitter = 0.0
-            else:
-                mean_dir /= norm
-                angles = []
-                for vec in valid_g:
-                    dot = np.clip(float(np.dot(vec, mean_dir)), -1.0, 1.0)
-                    angles.append(np.arccos(dot))
-                jitter = float(np.std(angles)) if len(angles) > 1 else 0.0
-
-        # High-frequency energy (how much the phone is being "shaken")
-        hf_window = hf_mag[idx_list]
-        hf_window = hf_window[np.isfinite(hf_window)]
-        hf_rms = float(np.sqrt(np.mean(hf_window**2))) if hf_window.size else 0.0
-
-        window_metrics.append(
-            {"window_start": w_start, "jitter": jitter, "hf_rms": hf_rms}
-        )
-
-    state_map = {}
-    stability_map = {}
-
-    if window_metrics:
-        jitters = np.array([m["jitter"] for m in window_metrics])
-        energies = np.array([m["hf_rms"] for m in window_metrics])
-
-        jitter_mad = np.median(np.abs(jitters - np.median(jitters)))
-        energy_mad = np.median(np.abs(energies - np.median(energies)))
-
-        if not np.isfinite(jitter_mad) or jitter_mad <= 0:
-            jitter_mad = max(np.std(jitters), 1e-3)
-        if not np.isfinite(energy_mad) or energy_mad <= 0:
-            energy_mad = max(np.std(energies), 1e-3)
-
-        for metrics in window_metrics:
-            j_norm = metrics["jitter"] / (1e-3 + jitter_mad)
-            e_norm = metrics["hf_rms"] / (1e-3 + energy_mad)
-
-            # squish into [0,1], higher = more chaotic / handheld
-            stability = 1.0 - np.exp(-0.6 * j_norm) * np.exp(-0.6 * e_norm)
-            stability = float(np.clip(stability, 0.0, 1.0))
-
-            w_start = metrics["window_start"]
-            stability_map[w_start] = stability
-            state_map[w_start] = _stability_label(stability)
-
-    df["stability"] = df["window_start"].map(stability_map).fillna(0.0)
-    df["mount_state"] = df["window_start"].map(state_map).fillna("stable")
-
-    # ---------- dynamic thresholds ----------
-    # CHANGE 1: Higher thresholds for Lebanese roads + old car
-    base_z = 3.5          # WAS 2.8 - only detect significant spikes
-    base_debounce = 1.0   # WAS 0.5 - prevent multiple detections per pothole
-
-    # Dynamic z-threshold: ~3.5 for very stable, higher for chaotic phone
-    df["z_thresh"] = base_z + df["stability"]  # WAS: base_z + 0.8 * df["stability"]
-
-    # Speed gate: ignore events below ~10.8 km/h
-    speed_series = df["speed_mps"]
-    has_speed = speed_series.notna().any()
-    if has_speed:
-        speed_ok = speed_series.fillna(0.0) >= 3.0  # 3 m/s ≈ 10.8 km/h
-    else:
-        # If GPS speed is missing, don't filter on speed.
-        speed_ok = pd.Series(True, index=df.index)
-
-    # CHANGE 2: Peak detection - only detect local maxima, not every high sample
-    df["is_peak"] = (
-        (df["z"] > df["z"].shift(1).fillna(-np.inf)) &
-        (df["z"] >= df["z"].shift(-1).fillna(-np.inf))
+    # 1-second windows
+    df["window_start"] = df["ts"].dt.floor("1s")
+    g_stats = (
+        df.groupby("window_start")["g_mag"]
+        .agg(["mean", "std"])
+        .rename(columns={"mean": "g_mean", "std": "g_std"})
+        .fillna(0.0)
     )
 
-    # Candidate events: only PEAKS that are big z-spikes while moving at reasonable speed
-    candidates = df[
-        df["is_peak"] &  # NEW: Only peaks
-        (df["z"] > df["z_thresh"]) &
-        speed_ok
-    ].copy()
+    # Map std -> stability [0,1]
+    low, high = 0.02, 0.5
+    g_stats["stability"] = (g_stats["g_std"] - low) / (high - low)
+    g_stats["stability"] = g_stats["stability"].clip(0.0, 1.0)
 
-    # ---------- debounce with stability awareness ----------
-    detections = []
-    last_ts = None
-    last_stability = 0.0
+    # Map stability to mount_state (coarse)
+    conds = [
+        g_stats["stability"] <= 0.25,
+        g_stats["stability"] <= 0.6,
+    ]
+    choices = ["mounted", "handheld"]
+    g_stats["mount_state"] = np.select(conds, choices, default="loose")
 
-    for _, r in candidates.iterrows():
-        if pd.isna(r["ts"]):
+    stability_map = g_stats["stability"].to_dict()
+    state_map = g_stats["mount_state"].to_dict()
+
+    df["stability"] = df["window_start"].map(stability_map).fillna(1.0)
+    df["mount_state"] = df["window_start"].map(state_map).fillna("unknown")
+
+    return df["stability"], df["mount_state"]
+
+
+def _compute_zscore(df: pd.DataFrame) -> pd.Series:
+    """
+    Compute a robust z-score for vertical acceleration.
+    For now, assume 'az' aligned with gravity-ish.
+    """
+    if "az" not in df.columns:
+        df["az"] = 0.0
+
+    acc = df["az"].astype(float)
+    med = acc.median()
+    mad = (acc - med).abs().median()
+
+    if mad <= 1e-6:
+        z = (acc - med) * 0.0
+    else:
+        z = 0.6745 * (acc - med) / (mad + 1e-6)
+
+    df["z"] = z.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return df["z"]
+
+
+def _detect_potholes(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Branch A: sharp vertical events = candidate potholes.
+    Uses z-score threshold + debouncing + speed + stability.
+    """
+    detections: List[Dict[str, Any]] = []
+    if df.empty:
+        return detections
+
+    z_thresh = 5.0      # z-score threshold for a strong bump
+    min_speed = 2.0     # m/s ~ 7.2 km/h
+    min_gap_s = 0.7     # debounce between events
+
+    last_event_ts = None
+    df = df.reset_index(drop=True)
+
+    for idx, row in df.iterrows():
+        z = row["z"]
+        speed = row.get("speed", np.nan)
+        stability = row.get("stability", 1.0)
+        ts = row["ts"]
+
+        if z < z_thresh:
+            continue
+        if not np.isnan(speed) and speed < min_speed:
+            continue
+        if stability > 0.9:
             continue
 
-        stab = float(r["stability"]) if not np.isnan(r["stability"]) else 0.0
-        # more chaotic phone = require events to be further apart
-        min_gap = base_debounce * (1.0 + max(stab, last_stability))
+        if last_event_ts is not None:
+            dt = (ts - last_event_ts).total_seconds()
+            if dt < min_gap_s:
+                continue
 
-        if last_ts is not None and (r["ts"] - last_ts).total_seconds() < min_gap:
-            continue
+        # Local peak refinement (±5 samples)
+        start = max(0, idx - 5)
+        end = min(len(df), idx + 6)
+        window = df.iloc[start:end]
+        peak_idx = window["z"].idxmax()
+        peak_row = df.loc[peak_idx]
+
+        intensity = float(abs(peak_row["z"]))
+        lat = float(peak_row.get("lat", np.nan))
+        lon = float(peak_row.get("lon", np.nan))
+        speed_p = float(peak_row.get("speed", np.nan))
+        stability_p = float(peak_row.get("stability", 1.0))
+        mount_state = str(peak_row.get("mount_state", "unknown"))
+
+        intensity_norm = np.tanh(intensity / 6.0)
+        stability_weight = 1.0 - stability_p
+        stability_weight = float(np.clip(stability_weight, 0.0, 1.0))
+        if np.isnan(speed_p):
+            speed_weight = 0.7
+        else:
+            speed_weight = float(np.clip(speed_p / 15.0, 0.3, 1.0))
+
+        confidence = float(
+            np.clip(intensity_norm * stability_weight * speed_weight, 0.0, 1.0)
+        )
 
         detections.append(
             {
-                "ts": r["ts"].to_pydatetime(),
-                "lat": None if pd.isna(r["lat"]) else float(r["lat"]),
-                "lon": None if pd.isna(r["lon"]) else float(r["lon"]),
-                "intensity": float(r["z"]) if not np.isnan(r["z"]) else 0.0,
-                "stability": stab,
-                "mount_state": r.get("mount_state", "stable"),
+                "ts": peak_row["ts"].to_pydatetime(),
+                "lat": lat,
+                "lon": lon,
+                "intensity": intensity,
+                "stability": stability_p,
+                "mount_state": mount_state,
+                "confidence": confidence,
             }
         )
-        last_ts = r["ts"]
-        last_stability = stab
 
-    # Only keep detections that actually have coordinates for clustering
-    det_geo = [d for d in detections if d["lat"] is not None and d["lon"] is not None]
-    if not det_geo:
-        return detections, []
+        last_event_ts = peak_row["ts"]
 
-    # ---------- spatial clustering (per-trip) ----------
-    # ~12 m radius in degrees (approx; good enough at city scale)
-    eps_deg = 12.0 / 111_111.0
-    X = np.array([[d["lat"], d["lon"]] for d in det_geo])
+    return detections
 
-    clustering = DBSCAN(eps=eps_deg, min_samples=3, metric="euclidean").fit(X)
-    labels = clustering.labels_
 
-    clusters = []
-    for lbl in set(labels):
-        if lbl == -1:
-            continue  # noise
+def _cluster_potholes_for_trip(
+    detections: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Trip-level clustering: group detections into ~10m cells.
+    Aggregation across trips happens in the DB.
+    """
+    if not detections:
+        return []
 
-        pts = [det_geo[i] for i in range(len(det_geo)) if labels[i] == lbl]
-        if not pts:
+    df = pd.DataFrame(detections)
+    df = df.dropna(subset=["lat", "lon"])
+    if df.empty:
+        return []
+
+    cell_deg = 10.0 / 111_111.0
+    df["lat_cell"] = (df["lat"] / cell_deg).round().astype(int)
+    df["lon_cell"] = (df["lon"] / cell_deg).round().astype(int)
+
+    clusters: List[Dict[str, Any]] = []
+
+    for (lat_cell, lon_cell), g in df.groupby(["lat_cell", "lon_cell"]):
+        hits = len(g)
+        if hits == 0:
             continue
 
-        lat = float(np.mean([p["lat"] for p in pts]))
-        lon = float(np.mean([p["lon"] for p in pts]))
-        hits = len(pts)
-        users = 1  # per-trip; cross-trip aggregation happens in DB
-        last_ts = max(p["ts"] for p in pts)
+        lat_mean = float(g["lat"].mean())
+        lon_mean = float(g["lon"].mean())
+        last_ts = g["ts"].max()
+        avg_intensity = float(g["intensity"].mean())
+        avg_stability = float(g["stability"].mean())
+        mount_counts = g["mount_state"].value_counts().to_dict()
+        avg_conf = float(g["confidence"].mean())
 
-        # Weighted intensity: stable mount counts more
-        intensity_records = [
-            (p["intensity"], max(0.0, 1.0 - p.get("stability", 0.0)))
-            for p in pts
-            if p.get("intensity") is not None
-        ]
-        if intensity_records:
-            intensities, weights = zip(*intensity_records)
-            weight_total = sum(weights)
-            if weight_total > 0:
-                weighted_sum = sum(i * w for i, w in zip(intensities, weights))
-                avg_int = float(weighted_sum / weight_total)
-            else:
-                avg_int = float(np.mean(intensities))
-        else:
-            avg_int = 0.0
+        exposure = float(hits)
 
-        avg_stability = float(
-            np.mean([p.get("stability", 0.0) for p in pts])
-        ) if pts else 0.0
+        cluster_key = f"{lat_cell}:{lon_cell}"
+        cluster_id = hashlib.sha1(cluster_key.encode("utf-8")).hexdigest()
 
-        mount_states = {}
-        for p in pts:
-            state = p.get("mount_state")
-            if state:
-                mount_states[state] = mount_states.get(state, 0) + 1
-
-        # Freshness term (last 60 days fades to 0).
-        now_utc = datetime.now(tz=timezone.utc)
-        if last_ts.tzinfo is None:
-            last_ts_aware = last_ts.replace(tzinfo=timezone.utc)
-        else:
-            last_ts_aware = last_ts
-        freshness = max(0.0, 1.0 - (now_utc - last_ts_aware).days / 60.0)
-
-        # Confidence: hits + freshness + intensity, but down-weighted if unstable
-        stability_weight = float(
-            np.mean([max(0.0, 1.0 - p.get("stability", 0.0)) for p in pts])
-        ) if pts else 0.0
-
-        confidence = (
-            0.3 * (min(hits, 10) / 10.0) * stability_weight
-            + 0.6 * freshness
-            + 0.1 * avg_int
-        )
-
-        # TODO: exposure (e.g. cars passing road segment) – for now 0.
-        exposure = 0.0
-        priority = 0.6 * confidence + 0.4 * exposure
-
-        # CHANGE 3: Coarse clustering to handle GPS variance across trips
-        # 4 decimal places = ~11m radius instead of 6 decimal places = ~0.1m
-        cid_src = f"{round(lat, 4)}:{round(lon, 4)}"  # WAS: round(lat, 6)
-        cluster_id = "pc_" + hashlib.sha1(cid_src.encode()).hexdigest()[0:10]
+        priority = float(avg_intensity * (0.5 + 0.5 * avg_conf))
 
         clusters.append(
             {
                 "cluster_id": cluster_id,
-                "lat": lat,
-                "lon": lon,
+                "lat": lat_mean,
+                "lon": lon_mean,
                 "hits": hits,
-                "users": users,
-                "last_ts": last_ts_aware,
-                "avg_intensity": avg_int,
+                "users": 1,
+                "last_ts": last_ts.to_pydatetime(),
+                "avg_intensity": avg_intensity,
                 "avg_stability": avg_stability,
-                "mount_state_counts": mount_states,
+                "mount_state_counts": mount_counts,
                 "exposure": exposure,
-                "confidence": confidence,
+                "confidence": avg_conf,
                 "priority": priority,
             }
         )
 
-    return detections, clusters
+    return clusters
+
+
+def _compute_rough_segments(df: pd.DataFrame) -> List[Dict[str, Any]]:
+    """
+    Branch B: road roughness segments (low quality stretches).
+    Uses only stable windows and z-score RMS in ~40m cells.
+    """
+    segments: List[Dict[str, Any]] = []
+
+    if df.empty:
+        return segments
+
+    df_geo = df.dropna(subset=["lat", "lon"]).copy()
+    if df_geo.empty:
+        return segments
+
+    df_geo = df_geo[df_geo["stability"] <= 0.4]
+    if df_geo.empty:
+        return segments
+
+    cell_deg = 40.0 / 111_111.0
+    df_geo["lat_cell"] = (df_geo["lat"] / cell_deg).round().astype(int)
+    df_geo["lon_cell"] = (df_geo["lon"] / cell_deg).round().astype(int)
+
+    for (lat_cell, lon_cell), g in df_geo.groupby(["lat_cell", "lon_cell"]):
+        if len(g) < 10:
+            continue
+
+        z_vals = g["z"].replace([np.inf, -np.inf], np.nan).dropna()
+        if z_vals.empty:
+            continue
+
+        roughness = float(np.sqrt(np.mean(z_vals ** 2)))
+        lat_mean = float(g["lat"].mean())
+        lon_mean = float(g["lon"].mean())
+        last_ts = g["ts"].max().to_pydatetime()
+
+        segment_key = f"{lat_cell}:{lon_cell}"
+        segment_id = hashlib.sha1(segment_key.encode("utf-8")).hexdigest()
+
+        segments.append(
+            {
+                "segment_id": segment_id,
+                "lat": lat_mean,
+                "lon": lon_mean,
+                "roughness": roughness,
+                "rough_windows": int(len(z_vals)),
+                "last_ts": last_ts,
+            }
+        )
+
+    return segments
+
+
+def process_trip_payload(
+    payload: Dict[str, Any]
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """
+    Main entrypoint.
+
+    Input:  payload (trip JSON from the app)
+    Output: (detections, pothole_clusters_for_this_trip, rough_segments_for_this_trip)
+    """
+    samples = payload.get("samples") or []
+    if not samples:
+        return [], [], []
+
+    df = pd.DataFrame(samples)
+    if df.empty:
+        return [], [], []
+
+    df["ts"] = _to_datetime_series(df, payload)
+    df = df.dropna(subset=["ts"])
+    df = df.sort_values("ts").reset_index(drop=True)
+
+    _normalize_columns(df)
+    _compute_stability(df)
+    _compute_zscore(df)
+
+    detections = _detect_potholes(df)
+    clusters = _cluster_potholes_for_trip(detections)
+    rough_segments = _compute_rough_segments(df)
+
+    return detections, clusters, rough_segments
