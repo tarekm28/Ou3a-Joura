@@ -30,8 +30,9 @@ app.add_middleware(
 pool: Optional[asyncpg.Pool] = None
 
 
+# ---------------------------------------------------------------------
 # Pydantic models matching Android payload
-
+# ---------------------------------------------------------------------
 
 
 class Sample(BaseModel):
@@ -68,9 +69,9 @@ class TripUpload(BaseModel):
     samples: List[Sample]
 
 
-
+# ---------------------------------------------------------------------
 # Startup / shutdown
-
+# ---------------------------------------------------------------------
 
 
 @app.on_event("startup")
@@ -89,9 +90,9 @@ async def shutdown() -> None:
         pool = None
 
 
-
+# ---------------------------------------------------------------------
 # Basic health
-
+# ---------------------------------------------------------------------
 
 
 @app.get("/api/v1/health")
@@ -99,9 +100,9 @@ async def health() -> Dict[str, str]:
     return {"status": "ok"}
 
 
-
+# ---------------------------------------------------------------------
 # Trip upload
-
+# ---------------------------------------------------------------------
 
 
 @app.post("/api/v1/trips")
@@ -173,8 +174,9 @@ async def upload_trip(
     return {"status": "accepted", "trip_id": trip.trip_id}
 
 
+# ---------------------------------------------------------------------
 # Helper: confidence model for clustered potholes
-
+# ---------------------------------------------------------------------
 
 
 def _compute_confidence(
@@ -232,14 +234,16 @@ def _compute_confidence(
     return float(max(0.0, min(1.0, confidence)))
 
 
+# ---------------------------------------------------------------------
 # Helper: DBSCAN clustering over detections
-
+# ---------------------------------------------------------------------
 
 
 def _cluster_potholes_from_df(
     df: pd.DataFrame,
     *,
     total_trips: int,
+    eps_m: float,
 ) -> List[Dict[str, Any]]:
     """
     Cluster detections spatially with DBSCAN + haversine.
@@ -256,6 +260,11 @@ def _cluster_potholes_from_df(
     if df.empty or total_trips <= 0:
         return []
 
+    # sanity clamp for eps_m
+    if not np.isfinite(eps_m) or eps_m <= 0:
+        eps_m = 5.0
+    eps_m = float(max(2.0, min(eps_m, 30.0)))  # between 2m and 30m
+
     # clean up timestamps
     df["ts"] = pd.to_datetime(df["ts"], utc=True, errors="coerce")
     df = df.dropna(subset=["ts", "latitude", "longitude"])
@@ -264,7 +273,6 @@ def _cluster_potholes_from_df(
 
     coords_rad = np.radians(df[["latitude", "longitude"]].to_numpy())
     earth_radius_m = 6_371_000.0
-    eps_m = 5.0  # ~5m spatial radius
     eps_rad = eps_m / earth_radius_m
 
     clustering = DBSCAN(
@@ -305,7 +313,7 @@ def _cluster_potholes_from_df(
             now_utc=now_utc,
         )
 
-        # Priority: confidence dominates, scaled by intensity
+        # Priority: confidence dominates, scaled by intensity and stability
         norm_intensity = min(avg_intensity / 10.0, 1.0)
         priority = float(
             0.7 * confidence
@@ -343,8 +351,9 @@ def _cluster_potholes_from_df(
     return clusters
 
 
-# Pothole clusters endpoint 
-
+# ---------------------------------------------------------------------
+# Pothole clusters endpoint (continuous confidence + optional dashboard mode)
+# ---------------------------------------------------------------------
 
 
 @app.get("/api/v1/clusters")
@@ -353,6 +362,7 @@ async def get_clusters(
     min_conf: float = 0.0,
     limit: int = 1000,
     dashboard: bool = False,
+    eps_m: float = 5.0,
 ) -> List[Dict[str, Any]]:
     """
     Stage 2 of the pipeline:
@@ -366,6 +376,8 @@ async def get_clusters(
       - dashboard: if true, we choose a quantile-based threshold from the
                    current confidence distribution instead of trusting
                    min_conf blindly. This is the "government UI" mode.
+      - eps_m: DBSCAN neighborhood radius in meters (default 5m). Larger
+               merges more nearby detections into a single pothole.
     """
     global pool
     if pool is None:
@@ -416,23 +428,19 @@ async def get_clusters(
     clusters = _cluster_potholes_from_df(
         df,
         total_trips=total_trips,
+        eps_m=eps_m,
     )
     if not clusters:
         return []
 
-    # Decide the effective threshold:
-    # - If dashboard=False: just use min_conf directly.
-    # - If dashboard=True:
-    #       - If min_conf > 0, use it (override).
-    #       - Else choose a quantile-based θ_conf from the data (e.g. 70th pct).
     confidences = np.array([c["confidence"] for c in clusters], dtype=float)
 
     if dashboard:
         if min_conf > 0.0:
             theta = min_conf
         else:
-            # quantile-based operating point, e.g. top 30% most confident
-            q = 0.7
+            # quantile-based operating point: show top ~25% most confident
+            q = 0.75
             theta = float(np.quantile(confidences, q)) if confidences.size > 0 else 0.0
     else:
         theta = max(0.0, min_conf)

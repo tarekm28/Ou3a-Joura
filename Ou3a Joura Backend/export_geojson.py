@@ -1,4 +1,5 @@
 import json
+import math
 from pathlib import Path
 
 import requests
@@ -7,24 +8,36 @@ import requests
 BACKEND_URL = "http://localhost:8000"
 
 OUT_DIR = Path(".")
-POTHOLES_ALL_FILE = OUT_DIR / "potholes_all.geojson"
-POTHOLES_DASHBOARD_FILE = OUT_DIR / "potholes_dashboard.geojson"
+
+# new filenames for potholes
+NEW_ALL_FILE = OUT_DIR / "new_all.geojson"
+NEW_DASHBOARD_FILE = OUT_DIR / "new_dashboard.geojson"
+
+# keep rough roads file name as before
 ROUGH_ROADS_FILE = OUT_DIR / "rough_roads.geojson"
 
+# quantile for dashboard selection among non-uncertain clusters
+DASHBOARD_QUANTILE = 0.6
 
-def fetch_clusters(min_conf: float = 0.0, limit: int = 1000, dashboard: bool = False):
-    """Fetch pothole clusters from the backend."""
+
+def fetch_clusters(min_conf: float = 0.0, limit: int = 1000):
+    """
+    Fetch pothole clusters from the backend.
+
+    We now ignore the backend's 'dashboard' flag and always fetch the full set,
+    then apply our own quantile-based selection on top of the existing
+    'likelihood' field.
+    """
     params = {
         "min_conf": min_conf,
         "limit": limit,
-        "dashboard": "true" if dashboard else "false",
     }
     resp = requests.get(f"{BACKEND_URL}/api/v1/clusters", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_rough_roads(min_conf: float = 0.4, limit: int = 1000):
+def fetch_rough_roads(min_conf: float = 0.0, limit: int = 1000):
     """Fetch rough road segments from the backend."""
     params = {
         "min_conf": min_conf,
@@ -33,6 +46,25 @@ def fetch_rough_roads(min_conf: float = 0.4, limit: int = 1000):
     resp = requests.get(f"{BACKEND_URL}/api/v1/road_quality", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
+
+
+def percentile(values, q: float) -> float:
+    """
+    Simple percentile implementation (q in [0,1]) without numpy.
+    """
+    if not values:
+        raise ValueError("Cannot compute percentile of empty list")
+    vals = sorted(values)
+    if len(vals) == 1:
+        return vals[0]
+    k = (len(vals) - 1) * q
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return vals[int(k)]
+    d0 = vals[f] * (c - k)
+    d1 = vals[c] * (k - f)
+    return d0 + d1
 
 
 def clusters_to_geojson(clusters):
@@ -55,6 +87,8 @@ def clusters_to_geojson(clusters):
             "avg_stability": c.get("avg_stability"),
             "exposure": c.get("exposure"),
             "last_ts": c.get("last_ts"),
+            # new: export whether this cluster is in the dashboard subset
+            "is_dashboard": c.get("is_dashboard", False),
         }
 
         features.append(
@@ -114,13 +148,42 @@ def rough_roads_to_geojson(segments):
 
 
 def main():
-    print("Fetching ALL clusters (no confidence cut, for debugging)...")
-    clusters_all = fetch_clusters(min_conf=0.0, limit=5000, dashboard=False)
+    # --- pothole clusters ---
+
+    print("Fetching ALL clusters (no confidence cut, for debugging + dashboard selection)...")
+    clusters_all = fetch_clusters(min_conf=0.0, limit=5000)
     print(f"  got {len(clusters_all)} clusters")
 
-    print("Fetching DASHBOARD clusters (quantile-based confidence)...")
-    clusters_dashboard = fetch_clusters(min_conf=0.0, limit=5000, dashboard=True)
-    print(f"  got {len(clusters_dashboard)} high-confidence clusters")
+    # mark all as non-dashboard by default
+    for c in clusters_all:
+        c["is_dashboard"] = False
+
+    # build candidate pool: exclude 'uncertain' likelihood
+    candidates = [c for c in clusters_all if c.get("likelihood") != "uncertain"]
+
+    if candidates:
+        conf_values = [float(c.get("confidence", 0.0)) for c in candidates]
+        conf_thresh = percentile(conf_values, DASHBOARD_QUANTILE)
+        print(
+            f"Dashboard selection based on {len(candidates)} non-uncertain clusters; "
+            f"{DASHBOARD_QUANTILE*100:.0f}th percentile of confidence = {conf_thresh:.3f}"
+        )
+
+        # mark dashboard clusters
+        for c in candidates:
+            conf = float(c.get("confidence", 0.0))
+            if conf >= conf_thresh:
+                c["is_dashboard"] = True
+    else:
+        conf_thresh = None
+        print("No non-uncertain clusters → dashboard will be empty.")
+
+    # split into all vs dashboard subsets
+    clusters_dashboard = [c for c in clusters_all if c.get("is_dashboard")]
+
+    print(f"  dashboard clusters after quantile cut: {len(clusters_dashboard)}")
+
+    # --- rough roads ---
 
     print("Fetching rough road segments...")
     rough_segments = fetch_rough_roads(min_conf=0.0, limit=5000)
@@ -131,13 +194,13 @@ def main():
     potholes_dash_geojson = clusters_to_geojson(clusters_dashboard)
     rough_roads_geojson = rough_roads_to_geojson(rough_segments)
 
-    # Save
-    POTHOLES_ALL_FILE.write_text(json.dumps(potholes_all_geojson, indent=2), encoding="utf-8")
-    POTHOLES_DASHBOARD_FILE.write_text(json.dumps(potholes_dash_geojson, indent=2), encoding="utf-8")
+    # Save (in current directory)
+    NEW_ALL_FILE.write_text(json.dumps(potholes_all_geojson, indent=2), encoding="utf-8")
+    NEW_DASHBOARD_FILE.write_text(json.dumps(potholes_dash_geojson, indent=2), encoding="utf-8")
     ROUGH_ROADS_FILE.write_text(json.dumps(rough_roads_geojson, indent=2), encoding="utf-8")
 
-    print(f"Saved ALL clusters to:        {POTHOLES_ALL_FILE}")
-    print(f"Saved DASHBOARD clusters to:  {POTHOLES_DASHBOARD_FILE}")
+    print(f"Saved ALL clusters to:        {NEW_ALL_FILE}")
+    print(f"Saved DASHBOARD clusters to:  {NEW_DASHBOARD_FILE}")
     print(f"Saved rough roads to:         {ROUGH_ROADS_FILE}")
     print("Now open these .geojson files in a map viewer (geojson.io, QGIS, etc.).")
 
