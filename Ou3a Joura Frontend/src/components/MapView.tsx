@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, CircleMarker } from 'react-leaflet';
+import { useEffect, useRef, useState } from 'react';
+import { MapContainer, TileLayer, Popup, CircleMarker, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { Cluster, RoadQualitySegment } from '../services/api';
+import { AlertCircle, Navigation, Info, TrendingUp, Users, Zap } from 'lucide-react';
 
 // Fix for default marker icons in React-Leaflet
 delete (L.Icon.Default.prototype as any)._getIconUrl;
@@ -18,20 +19,20 @@ interface MapViewProps {
   showRoadQuality: boolean;
   onClusterClick?: (cluster: Cluster) => void;
   onSegmentClick?: (segment: RoadQualitySegment) => void;
+  isPreview?: boolean;
 }
 
-export default function MapView({
-  clusters,
-  roadSegments,
-  showClusters,
-  showRoadQuality,
-  onClusterClick,
-  onSegmentClick,
-}: MapViewProps) {
-  const mapRef = useRef<L.Map | null>(null);
+// Component to handle map bounds
+function MapBounds({ clusters, roadSegments, showClusters, showRoadQuality }: {
+  clusters: Cluster[];
+  roadSegments: RoadQualitySegment[];
+  showClusters: boolean;
+  showRoadQuality: boolean;
+}) {
+  const map = useMap();
 
   useEffect(() => {
-    if (mapRef.current && (clusters.length > 0 || roadSegments.length > 0)) {
+    if ((clusters.length > 0 || roadSegments.length > 0) && !map.getBounds().isValid()) {
       const bounds: L.LatLngBoundsExpression = [];
       
       if (showClusters && clusters.length > 0) {
@@ -51,12 +52,28 @@ export default function MapView({
       }
 
       if (bounds.length > 0) {
-        mapRef.current.fitBounds(bounds, { padding: [50, 50] });
+        map.fitBounds(bounds, { padding: [50, 50] });
       }
     }
-  }, [clusters, roadSegments, showClusters, showRoadQuality]);
+  }, [clusters, roadSegments, showClusters, showRoadQuality, map]);
 
-  const getClusterColor = (confidence: number, likelihood?: string) => {
+  return null;
+}
+
+export default function MapView({
+  clusters,
+  roadSegments,
+  showClusters,
+  showRoadQuality,
+  onClusterClick,
+  onSegmentClick,
+  isPreview = false,
+}: MapViewProps) {
+  const mapRef = useRef<L.Map | null>(null);
+  const [, setSelectedCluster] = useState<Cluster | null>(null);
+  const [, setSelectedSegment] = useState<RoadQualitySegment | null>(null);
+
+  const getClusterColor = (_confidence: number, likelihood?: string) => {
     if (likelihood === 'very_likely') return '#dc2626'; // red-600
     if (likelihood === 'likely') return '#f59e0b'; // amber-500
     return '#6b7280'; // gray-500
@@ -68,53 +85,146 @@ export default function MapView({
     return '#eab308'; // yellow-500
   };
 
-  // Default center (you can change this to your region)
-  const defaultCenter: [number, number] = [33.8938, 35.5018]; // Beirut, Lebanon
+  const getClusterSize = (hits: number) => {
+    return Math.max(6, Math.min(20, hits * 0.5));
+  };
+
+  // Default center (Beirut, Lebanon)
+  const defaultCenter: [number, number] = [33.8938, 35.5018];
+  const defaultZoom = isPreview ? 12 : 13;
+
+  const handleClusterClick = (cluster: Cluster) => {
+    setSelectedCluster(cluster);
+    setSelectedSegment(null);
+    onClusterClick?.(cluster);
+  };
+
+  const handleSegmentClick = (segment: RoadQualitySegment) => {
+    setSelectedSegment(segment);
+    setSelectedCluster(null);
+    onSegmentClick?.(segment);
+  };
 
   return (
-    <div className="w-full h-full" style={{ minHeight: '600px' }}>
+    <div className="w-full h-full" style={{ minHeight: isPreview ? '400px' : '600px' }}>
       <MapContainer
         center={defaultCenter}
-        zoom={13}
-        style={{ height: '100%', width: '100%', minHeight: '600px' }}
+        zoom={defaultZoom}
+        style={{ height: '100%', width: '100%', minHeight: isPreview ? '400px' : '600px' }}
         ref={mapRef}
-        scrollWheelZoom={true}
-        doubleClickZoom={true}
-        zoomControl={true}
+        scrollWheelZoom={!isPreview}
+        doubleClickZoom={!isPreview}
+        zoomControl={!isPreview}
+        dragging={!isPreview}
+        touchZoom={!isPreview}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         
+        <MapBounds 
+          clusters={clusters} 
+          roadSegments={roadSegments}
+          showClusters={showClusters}
+          showRoadQuality={showRoadQuality}
+        />
+        
         {showClusters && clusters.map((cluster) => {
           if (!cluster.latitude || !cluster.longitude) return null;
+          
+          const color = getClusterColor(cluster.confidence, cluster.likelihood);
+          const size = getClusterSize(cluster.hits);
           
           return (
             <CircleMarker
               key={cluster.cluster_id}
               center={[cluster.latitude, cluster.longitude]}
-              radius={Math.max(5, Math.min(15, cluster.hits))}
+              radius={size}
               pathOptions={{
-                color: getClusterColor(cluster.confidence, cluster.likelihood),
-                fillColor: getClusterColor(cluster.confidence, cluster.likelihood),
-                fillOpacity: 0.6,
-                weight: 2,
+                color: color,
+                fillColor: color,
+                fillOpacity: cluster.likelihood === 'very_likely' ? 0.7 : 0.5,
+                weight: cluster.likelihood === 'very_likely' ? 3 : 2,
               }}
               eventHandlers={{
-                click: () => onClusterClick?.(cluster),
+                click: () => handleClusterClick(cluster),
               }}
             >
               <Popup maxWidth={400} className="custom-popup">
-                <div className="p-4 min-w-[300px]">
-                  <h3 className="font-bold text-lg mb-3 text-gray-900">Pothole Cluster</h3>
-                  <div className="space-y-2">
-                    <p className="text-base"><strong className="text-gray-700">Confidence:</strong> <span className="text-gray-900">{(cluster.confidence * 100).toFixed(1)}%</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Likelihood:</strong> <span className="text-gray-900">{cluster.likelihood || 'N/A'}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Hits:</strong> <span className="text-gray-900">{cluster.hits}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Users:</strong> <span className="text-gray-900">{cluster.users}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Intensity:</strong> <span className="text-gray-900">{cluster.avg_intensity.toFixed(2)}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Priority:</strong> <span className="text-gray-900">{(cluster.priority * 100).toFixed(1)}%</span></p>
+                <div className="popup-content">
+                  <div className="popup-header">
+                    <div className="popup-icon-wrapper" style={{ background: `${color}20`, color: color }}>
+                      <AlertCircle className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="popup-title">Pothole Cluster</h3>
+                      <p className="popup-subtitle">Detection #{cluster.cluster_id.substring(0, 8)}</p>
+                    </div>
+                  </div>
+                  
+                  <div className="popup-stats-grid">
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <TrendingUp className="w-4 h-4" />
+                        Confidence
+                      </div>
+                      <div className="popup-stat-value">
+                        {(cluster.confidence * 100).toFixed(1)}%
+                      </div>
+                      <div className="popup-stat-bar">
+                        <div 
+                          className="popup-stat-bar-fill"
+                          style={{ 
+                            width: `${cluster.confidence * 100}%`,
+                            background: color
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <AlertCircle className="w-4 h-4" />
+                        Likelihood
+                      </div>
+                      <div className={`popup-stat-badge popup-stat-badge-${cluster.likelihood || 'uncertain'}`}>
+                        {cluster.likelihood || 'uncertain'}
+                      </div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <Zap className="w-4 h-4" />
+                        Hits
+                      </div>
+                      <div className="popup-stat-value">{cluster.hits}</div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <Users className="w-4 h-4" />
+                        Users
+                      </div>
+                      <div className="popup-stat-value">{cluster.users}</div>
+                    </div>
+                  </div>
+
+                  <div className="popup-details">
+                    <div className="popup-detail-row">
+                      <span className="popup-detail-label">Intensity:</span>
+                      <span className="popup-detail-value">{cluster.avg_intensity.toFixed(2)}</span>
+                    </div>
+                    <div className="popup-detail-row">
+                      <span className="popup-detail-label">Priority:</span>
+                      <span className="popup-detail-value">{(cluster.priority * 100).toFixed(1)}%</span>
+                    </div>
+                    <div className="popup-detail-row">
+                      <span className="popup-detail-label">Location:</span>
+                      <span className="popup-detail-value font-mono text-xs">
+                        {cluster.latitude.toFixed(6)}, {cluster.longitude.toFixed(6)}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </Popup>
@@ -125,29 +235,89 @@ export default function MapView({
         {showRoadQuality && roadSegments.map((segment) => {
           if (!segment.latitude || !segment.longitude) return null;
           
+          const color = getRoughnessColor(segment.roughness);
+          
           return (
             <CircleMarker
               key={segment.segment_id}
               center={[segment.latitude, segment.longitude]}
               radius={8}
               pathOptions={{
-                color: getRoughnessColor(segment.roughness),
-                fillColor: getRoughnessColor(segment.roughness),
+                color: color,
+                fillColor: color,
                 fillOpacity: 0.5,
                 weight: 2,
               }}
               eventHandlers={{
-                click: () => onSegmentClick?.(segment),
+                click: () => handleSegmentClick(segment),
               }}
             >
               <Popup maxWidth={400} className="custom-popup">
-                <div className="p-4 min-w-[300px]">
-                  <h3 className="font-bold text-lg mb-3 text-gray-900">Rough Road Segment</h3>
-                  <div className="space-y-2">
-                    <p className="text-base"><strong className="text-gray-700">Roughness:</strong> <span className="text-gray-900">{segment.roughness.toFixed(2)}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Confidence:</strong> <span className="text-gray-900">{(segment.confidence * 100).toFixed(1)}%</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Trips:</strong> <span className="text-gray-900">{segment.trips}</span></p>
-                    <p className="text-base"><strong className="text-gray-700">Windows:</strong> <span className="text-gray-900">{segment.rough_windows}</span></p>
+                <div className="popup-content">
+                  <div className="popup-header">
+                    <div className="popup-icon-wrapper" style={{ background: `${color}20`, color: color }}>
+                      <Navigation className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <h3 className="popup-title">Rough Road Segment</h3>
+                      <p className="popup-subtitle">Segment #{segment.segment_id.substring(0, 8)}</p>
+                    </div>
+                  </div>
+                  
+                  <div className="popup-stats-grid">
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <TrendingUp className="w-4 h-4" />
+                        Roughness
+                      </div>
+                      <div className="popup-stat-value">
+                        {segment.roughness.toFixed(2)}
+                      </div>
+                      <div className="popup-stat-bar">
+                        <div 
+                          className="popup-stat-bar-fill"
+                          style={{ 
+                            width: `${Math.min(segment.roughness * 20, 100)}%`,
+                            background: color
+                          }}
+                        ></div>
+                      </div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <Info className="w-4 h-4" />
+                        Confidence
+                      </div>
+                      <div className="popup-stat-value">
+                        {(segment.confidence * 100).toFixed(1)}%
+                      </div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <Navigation className="w-4 h-4" />
+                        Trips
+                      </div>
+                      <div className="popup-stat-value">{segment.trips}</div>
+                    </div>
+
+                    <div className="popup-stat">
+                      <div className="popup-stat-label">
+                        <Zap className="w-4 h-4" />
+                        Windows
+                      </div>
+                      <div className="popup-stat-value">{segment.rough_windows}</div>
+                    </div>
+                  </div>
+
+                  <div className="popup-details">
+                    <div className="popup-detail-row">
+                      <span className="popup-detail-label">Location:</span>
+                      <span className="popup-detail-value font-mono text-xs">
+                        {segment.latitude.toFixed(6)}, {segment.longitude.toFixed(6)}
+                      </span>
+                    </div>
                   </div>
                 </div>
               </Popup>
@@ -158,5 +328,3 @@ export default function MapView({
     </div>
   );
 }
-
-
