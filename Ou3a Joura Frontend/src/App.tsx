@@ -1,432 +1,271 @@
-import { useState, useEffect, useCallback } from 'react';
-import { 
-  RefreshCw, Map, Table, BarChart3, Settings, 
-  Menu, X, Zap, TrendingUp, AlertCircle, 
-  Layers, Download, Home
-} from 'lucide-react';
-import { apiService, Cluster, RoadQualitySegment } from './services/api';
-import MapView from './components/MapView';
-import StatisticsPanel from './components/StatisticsPanel';
-import DataTable from './components/DataTable';
-import Filters from './components/Filters';
-import './App.css';
+// src/App.tsx
+import { useEffect, useMemo, useState } from "react";
+import "./App.css";
+import { fetchClusters, PotholeCluster } from "./services/api";
+import { MapView } from "./components/MapView";
+import { Filters, FiltersState } from "./components/Filters";
+import { StatisticsPanel } from "./components/StatisticsPanel";
+import { DataTable } from "./components/DataTable";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
-type ViewMode = 'dashboard' | 'map' | 'clusters' | 'roadQuality' | 'analytics';
+type ViewMode = "dashboard" | "all";
 
-function App() {
-  const [clusters, setClusters] = useState<Cluster[]>([]);
-  const [roadSegments, setRoadSegments] = useState<RoadQualitySegment[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+function applyFilters(
+  clusters: PotholeCluster[],
+  filters: FiltersState
+): PotholeCluster[] {
+  return clusters.filter((c) => {
+    if (filters.minConfidence > 0 && c.confidence < filters.minConfidence) {
+      return false;
+    }
+    if (filters.minHits > 0 && c.hits < filters.minHits) {
+      return false;
+    }
+    if (filters.likelihoods.length > 0) {
+      // If likelihoods are selected, cluster's likelihood must be in the selected list
+      const clusterLikelihood = c.likelihood || "uncertain";
+      if (!filters.likelihoods.includes(clusterLikelihood)) {
+        return false;
+      }
+    }
+    if (filters.status !== "all" && c.status !== filters.status) {
+      return false;
+    }
+    return true;
+  });
+}
+
+export default function App() {
+  const [viewMode, setViewMode] = useState<ViewMode>("dashboard");
+
+  const [clustersDashboard, setClustersDashboard] = useState<PotholeCluster[]>([]);
+  const [clustersAll, setClustersAll] = useState<PotholeCluster[]>([]);
+
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [minConfidence, setMinConfidence] = useState(0.0);
-  const [limit, setLimit] = useState(1000);
-  const [showClusters, setShowClusters] = useState(true);
-  const [showRoadQuality, setShowRoadQuality] = useState(true);
-  const [viewMode, setViewMode] = useState<ViewMode>('dashboard');
-  const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
 
-  const fetchData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
+  const [filters, setFilters] = useState<FiltersState>({
+    minConfidence: 0,
+    minHits: 0,
+    likelihoods: [],
+    status: "all",
+  });
+
+  const [selectedClusterId, setSelectedClusterId] = useState<string | null>(null);
+
+  const activeClusters = viewMode === "dashboard" ? clustersDashboard : clustersAll;
+
+  // Fetch function
+  const loadData = async () => {
     try {
-      const [clustersData, roadQualityData] = await Promise.all([
-        apiService.getClusters({ min_conf: minConfidence, limit }),
-        apiService.getRoadQuality({ min_conf: minConfidence, limit }),
+      setLoading(true);
+      setError(null);
+
+      const [dash, all] = await Promise.all([
+        fetchClusters({ dashboard: true, limit: 5000 }),
+        fetchClusters({ dashboard: false, limit: 5000 }),
       ]);
-      setClusters(clustersData);
-      setRoadSegments(roadQualityData);
-      setLastUpdate(new Date());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch data');
-      console.error('Error fetching data:', err);
+
+      // Default status: none
+      const initStatus = (list: PotholeCluster[]) =>
+        list.map((c) => ({ ...c, status: c.status ?? "none" as const }));
+
+      setClustersDashboard(initStatus(dash));
+      setClustersAll(initStatus(all));
+    } catch (err: any) {
+      setError(err?.message ?? "Failed to load data");
     } finally {
-      setIsLoading(false);
+      setLoading(false);
     }
-  }, [minConfidence, limit]);
-
-  useEffect(() => {
-    // Initial fetch with error handling
-    fetchData().catch(err => {
-      console.error('Initial data fetch failed:', err);
-      setError('Unable to connect to backend API. Please ensure the backend is running on http://localhost:8000');
-      setIsLoading(false);
-    });
-    // Auto-refresh every 30 seconds
-    const interval = setInterval(() => {
-      fetchData().catch(err => console.error('Auto-refresh failed:', err));
-    }, 30000);
-    return () => clearInterval(interval);
-  }, [fetchData]);
-
-  // Add error handling for API failures
-  useEffect(() => {
-    if (error) {
-      console.error('App error:', error);
-    }
-  }, [error]);
-
-  const navigationItems = [
-    { id: 'dashboard' as ViewMode, label: 'Dashboard', icon: Home, color: 'from-blue-500 to-cyan-500' },
-    { id: 'map' as ViewMode, label: 'Map View', icon: Map, color: 'from-green-500 to-emerald-500' },
-    { id: 'clusters' as ViewMode, label: 'Pothole Clusters', icon: AlertCircle, color: 'from-red-500 to-rose-500' },
-    { id: 'roadQuality' as ViewMode, label: 'Road Quality', icon: Layers, color: 'from-orange-500 to-amber-500' },
-    { id: 'analytics' as ViewMode, label: 'Analytics', icon: BarChart3, color: 'from-purple-500 to-pink-500' },
-  ];
-
-  const quickStats = {
-    totalClusters: clusters.length,
-    veryLikely: clusters.filter(c => c.likelihood === 'very_likely').length,
-    totalHits: clusters.reduce((sum, c) => sum + c.hits, 0),
-    avgConfidence: clusters.length > 0
-      ? (clusters.reduce((sum, c) => sum + c.confidence, 0) / clusters.length * 100).toFixed(1)
-      : '0.0',
-    totalSegments: roadSegments.length,
-    avgRoughness: roadSegments.length > 0
-      ? (roadSegments.reduce((sum, s) => sum + s.roughness, 0) / roadSegments.length).toFixed(2)
-      : '0.00',
   };
 
+  // Restore status from localStorage (demo: gov marking potholes as fixed)
+  useEffect(() => {
+    const stored = localStorage.getItem("ouaa_cluster_status");
+    if (!stored) return;
+    try {
+      const statusMap: Record<string, PotholeCluster["status"]> = JSON.parse(stored);
+      const applyStatus = (list: PotholeCluster[]) =>
+        list.map((c) => ({
+          ...c,
+          status: statusMap[c.cluster_id] ?? c.status ?? "none",
+        }));
+      setClustersDashboard((prev) => applyStatus(prev));
+      setClustersAll((prev) => applyStatus(prev));
+    } catch {
+      // ignore
+    }
+  }, []);
+
+  // Fetch data on mount
+  useEffect(() => {
+    loadData();
+  }, []);
+
+  // Calculate max hits from all clusters for dynamic slider range
+  const maxHits = useMemo(() => {
+    const allClusters = [...clustersDashboard, ...clustersAll];
+    if (allClusters.length === 0) return 20;
+    const maxValue = Math.max(...allClusters.map((c) => c.hits));
+    // Round up to nearest 100
+    return Math.ceil(maxValue / 100) * 100;
+  }, [clustersDashboard, clustersAll]);
+
+  // Derived: filtered clusters
+  const filteredClusters = useMemo(
+    () => applyFilters(activeClusters, filters),
+    [activeClusters, filters]
+  );
+
+
+
+  function handleStatusChange(id: string, status: PotholeCluster["status"]) {
+    const updateList = (list: PotholeCluster[]) =>
+      list.map((c) => (c.cluster_id === id ? { ...c, status } : c));
+
+    setClustersDashboard((prev) => updateList(prev));
+    setClustersAll((prev) => updateList(prev));
+
+    // persist in localStorage (demo: pretend gov changed status)
+    const currentStatus: Record<string, PotholeCluster["status"]> = {};
+    [...clustersDashboard, ...clustersAll].forEach((c) => {
+      currentStatus[c.cluster_id] = c.status ?? "none";
+    });
+    currentStatus[id] = status;
+    localStorage.setItem("ouaa_cluster_status", JSON.stringify(currentStatus));
+  }
+
   return (
-    <div className="app-container">
-      {/* Top Navigation Bar */}
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-left">
-            <button
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="menu-toggle"
-              aria-label="Toggle sidebar"
-            >
-              {sidebarOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
-            </button>
-            <div className="logo-section">
-              <div className="logo-icon">
-                <Zap className="w-8 h-8" />
+    <ErrorBoundary>
+      <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+        {/* Top bar */}
+        <header className="border-b border-slate-800 bg-slate-900/80 backdrop-blur">
+          <div className="mx-auto max-w-7xl px-4 py-3 flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="h-9 w-9 rounded-xl bg-emerald-500 flex items-center justify-center font-bold text-slate-900 shadow-lg shadow-emerald-500/40">
+                OJ
               </div>
               <div>
-                <h1 className="app-title">Ou3a Joura</h1>
-                <p className="app-subtitle">Smart Road Quality Detection</p>
+                <h1 className="text-lg font-semibold">Ou3a Joura! – Government Dashboard</h1>
+                <p className="text-xs text-slate-400">
+                  Data-driven pothole prioritization for Lebanese roads
+                </p>
               </div>
             </div>
-          </div>
-          
-          <div className="header-right">
-            <div className="status-indicator">
-              <div className={`status-dot ${isLoading ? 'loading' : 'active'}`}></div>
-              <span className="status-text">
-                {isLoading ? 'Loading...' : `Updated ${lastUpdate.toLocaleTimeString()}`}
-              </span>
-            </div>
-            <button
-              onClick={fetchData}
-              disabled={isLoading}
-              className="refresh-btn"
-              title="Refresh data"
-            >
-              <RefreshCw className={`w-5 h-5 ${isLoading ? 'spinning' : ''}`} />
-            </button>
-            {viewMode === 'map' && (
+
+            <div className="flex items-center gap-3">
+              {loading && (
+                <span className="text-[11px] text-slate-400 animate-pulse">Loading data...</span>
+              )}
               <button
-                onClick={() => setSidebarOpen(!sidebarOpen)}
-                className="settings-btn"
-                title="Toggle filters"
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  viewMode === "dashboard"
+                    ? "bg-emerald-500 text-slate-900 border-emerald-400"
+                    : "bg-slate-900 text-slate-200 border-slate-700"
+                }`}
+                onClick={() => setViewMode("dashboard")}
               >
-                <Settings className="w-5 h-5" />
+                High-priority view
               </button>
-            )}
+              <button
+                className={`px-3 py-1 rounded-full text-xs border ${
+                  viewMode === "all"
+                    ? "bg-emerald-500 text-slate-900 border-emerald-400"
+                    : "bg-slate-900 text-slate-200 border-slate-700"
+                }`}
+                onClick={() => setViewMode("all")}
+              >
+                All detections
+              </button>
+            </div>
           </div>
-        </div>
-      </header>
+        </header>
 
-      <div className="app-body">
-        {/* Sidebar Navigation */}
-        <aside className={`sidebar ${sidebarOpen ? 'open' : 'closed'}`}>
-          <nav className="sidebar-nav">
-            {navigationItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = viewMode === item.id;
-              return (
+        {/* Main grid */}
+        <main className="flex-1 mx-auto max-w-7xl w-full px-4 py-4 grid grid-cols-1 xl:grid-cols-[260px,minmax(0,1fr)] gap-4">
+          {/* Left: Filters + stats */}
+          <div className="flex flex-col gap-4">
+            <Filters
+              filters={filters}
+              onChange={setFilters}
+              viewMode={viewMode}
+              maxHits={maxHits}
+            />
+            <StatisticsPanel
+              clusters={activeClusters}
+              filteredClusters={filteredClusters}
+              viewMode={viewMode}
+              loading={loading}
+              error={error}
+            />
+          </div>
+
+          {/* Right: Map + table */}
+          {error ? (
+            <div className="flex-1 flex items-center justify-center rounded-2xl border border-rose-800 bg-rose-950/30">
+              <div className="max-w-md text-center px-6 py-8">
+                <div className="text-4xl mb-4">⚠️</div>
+                <h3 className="text-lg font-semibold text-rose-200 mb-2">Connection Error</h3>
+                <p className="text-sm text-rose-100/70 mb-4">{error}</p>
+                <p className="text-xs text-rose-100/50 mb-4">
+                  Make sure the backend API is running on <code className="bg-slate-900 px-2 py-1 rounded">http://localhost:8000</code>
+                </p>
                 <button
-                  key={item.id}
                   onClick={() => {
-                    setViewMode(item.id);
-                    if (window.innerWidth < 1024) setSidebarOpen(false);
+                    setError(null);
+                    // Retry fetch
+                    setTimeout(() => {
+                      loadData();
+                    }, 500);
                   }}
-                  className={`nav-item ${isActive ? 'active' : ''}`}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg text-sm font-medium transition-colors"
                 >
-                  <div className={`nav-icon-wrapper bg-gradient-to-br ${item.color}`}>
-                    <Icon className="w-5 h-5" />
-                  </div>
-                  <span className="nav-label">{item.label}</span>
-                  {isActive && <div className="nav-indicator"></div>}
+                  Retry
                 </button>
-              );
-            })}
-          </nav>
-
-          {/* Quick Stats in Sidebar */}
-          {viewMode === 'dashboard' && (
-            <div className="sidebar-stats">
-              <h3 className="sidebar-stats-title">Quick Overview</h3>
-              <div className="quick-stats-grid">
-                <div className="quick-stat-card">
-                  <div className="quick-stat-icon bg-blue-100 text-blue-600">
-                    <AlertCircle className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="quick-stat-value">{quickStats.totalClusters}</p>
-                    <p className="quick-stat-label">Clusters</p>
-                  </div>
-                </div>
-                <div className="quick-stat-card">
-                  <div className="quick-stat-icon bg-red-100 text-red-600">
-                    <TrendingUp className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="quick-stat-value">{quickStats.veryLikely}</p>
-                    <p className="quick-stat-label">Critical</p>
-                  </div>
-                </div>
-                <div className="quick-stat-card">
-                  <div className="quick-stat-icon bg-green-100 text-green-600">
-                    <Layers className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <p className="quick-stat-value">{quickStats.totalSegments}</p>
-                    <p className="quick-stat-label">Segments</p>
-                  </div>
-                </div>
               </div>
             </div>
-          )}
-
-          {/* Filters Panel in Sidebar for Map View */}
-          {viewMode === 'map' && sidebarOpen && (
-            <div className="sidebar-filters">
-              <Filters
-                minConfidence={minConfidence}
-                onMinConfidenceChange={setMinConfidence}
-                showClusters={showClusters}
-                onShowClustersChange={setShowClusters}
-                showRoadQuality={showRoadQuality}
-                onShowRoadQualityChange={setShowRoadQuality}
-                limit={limit}
-                onLimitChange={setLimit}
-                onRefresh={fetchData}
-                isLoading={isLoading}
-              />
-            </div>
-          )}
-        </aside>
-
-        {/* Main Content Area */}
-        <main className="main-content">
-          {/* Error Banner */}
-          {error && (
-            <div className="error-banner">
-              <AlertCircle className="w-5 h-5" />
-              <div>
-                <p className="error-title">Connection Error</p>
-                <p className="error-message">{error}</p>
-              </div>
-              <button onClick={fetchData} className="error-retry-btn">
-                Retry
-              </button>
-            </div>
-          )}
-
-          {/* Dashboard View */}
-          {viewMode === 'dashboard' && (
-            <div className="dashboard-view">
-              <div className="dashboard-header">
-                <div>
-                  <h2 className="dashboard-title">Road Quality Dashboard</h2>
-                  <p className="dashboard-subtitle">Real-time pothole detection and road quality analysis</p>
-                </div>
-                <div className="dashboard-actions">
-                  <button className="action-btn secondary">
-                    <Download className="w-4 h-4" />
-                    Export Data
-                  </button>
-                  <button className="action-btn primary" onClick={fetchData} disabled={isLoading}>
-                    <RefreshCw className={`w-4 h-4 ${isLoading ? 'spinning' : ''}`} />
-                    Refresh
-                  </button>
-                </div>
-              </div>
-
-              <StatisticsPanel
-                clusters={clusters}
-                roadSegments={roadSegments}
-                isLoading={isLoading}
-              />
-
-              <div className="dashboard-grid">
-                <div className="dashboard-card map-preview">
-                  <div className="card-header">
-                    <Map className="w-5 h-5" />
-                    <h3>Interactive Map</h3>
-                    <button 
-                      onClick={() => setViewMode('map')}
-                      className="card-action-btn"
-                    >
-                      View Full Map →
-                    </button>
-                  </div>
-                  <div className="map-preview-container">
-                    <MapView
-                      clusters={clusters}
-                      roadSegments={roadSegments}
-                      showClusters={showClusters}
-                      showRoadQuality={showRoadQuality}
-                      isPreview={true}
-                    />
-                  </div>
-                </div>
-
-                <div className="dashboard-card">
-                  <div className="card-header">
-                    <Table className="w-5 h-5" />
-                    <h3>Recent Clusters</h3>
-                  </div>
-                  <div className="recent-clusters">
-                    {clusters.slice(0, 5).map((cluster) => (
-                      <div key={cluster.cluster_id} className="recent-cluster-item">
-                        <div className="cluster-badge" data-likelihood={cluster.likelihood || 'uncertain'}>
-                          {cluster.likelihood || 'uncertain'}
-                        </div>
-                        <div className="cluster-info">
-                          <p className="cluster-confidence">
-                            {(cluster.confidence * 100).toFixed(1)}% confidence
-                          </p>
-                          <p className="cluster-details">
-                            {cluster.hits} hits • {cluster.users} users
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                    {clusters.length === 0 && !isLoading && (
-                      <p className="empty-state">No clusters found</p>
-                    )}
-                  </div>
-                </div>
+          ) : loading ? (
+            <div className="flex-1 flex items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/60">
+              <div className="text-center">
+                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-500 mx-auto mb-4"></div>
+                <p className="text-slate-300">Loading pothole data...</p>
               </div>
             </div>
-          )}
-
-          {/* Map View */}
-          {viewMode === 'map' && (
-            <div className="map-view-container">
-              <div className="map-header">
-                <h2 className="view-title">Interactive Map</h2>
-                <div className="map-controls">
-                  <button
-                    className={`control-btn ${showClusters ? 'active' : ''}`}
-                    onClick={() => setShowClusters(!showClusters)}
-                  >
-                    <AlertCircle className="w-4 h-4" />
-                    Potholes
-                  </button>
-                  <button
-                    className={`control-btn ${showRoadQuality ? 'active' : ''}`}
-                    onClick={() => setShowRoadQuality(!showRoadQuality)}
-                  >
-                    <Layers className="w-4 h-4" />
-                    Road Quality
-                  </button>
-                </div>
+          ) : activeClusters.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center rounded-2xl border border-slate-800 bg-slate-900/60">
+              <div className="text-center">
+                <div className="text-4xl mb-4">🛣️</div>
+                <p className="text-slate-300 mb-2">No clusters loaded yet</p>
+                <p className="text-sm text-slate-500">
+                  {viewMode === "dashboard"
+                    ? "Switch to 'All detections' for more data"
+                    : "No pothole clusters found in the backend"}
+                </p>
               </div>
-              <div className="map-wrapper">
+            </div>
+          ) : (
+            <div className="flex flex-col gap-4 min-h-[70vh]">
+              <div className="flex-1 min-h-[320px] rounded-2xl border border-slate-800 bg-slate-900/60 overflow-hidden">
                 <MapView
-                  clusters={clusters}
-                  roadSegments={roadSegments}
-                  showClusters={showClusters}
-                  showRoadQuality={showRoadQuality}
+                  clusters={filteredClusters}
+                  selectedClusterId={selectedClusterId}
+                  onSelectCluster={setSelectedClusterId}
+                />
+              </div>
+
+              <div className="h-[280px] rounded-2xl border border-slate-800 bg-slate-900/60 overflow-hidden">
+                <DataTable
+                  clusters={filteredClusters}
+                  selectedClusterId={selectedClusterId}
+                  onSelectCluster={setSelectedClusterId}
+                  onStatusChange={handleStatusChange}
+                  loading={loading}
                 />
               </div>
             </div>
           )}
-
-          {/* Clusters Table View */}
-          {viewMode === 'clusters' && (
-            <div className="table-view-container">
-              <div className="view-header">
-                <div>
-                  <h2 className="view-title">Pothole Clusters</h2>
-                  <p className="view-subtitle">
-                    {clusters.length} clusters detected • {quickStats.veryLikely} require immediate attention
-                  </p>
-                </div>
-                <div className="view-actions">
-                  <Filters
-                    minConfidence={minConfidence}
-                    onMinConfidenceChange={setMinConfidence}
-                    showClusters={showClusters}
-                    onShowClustersChange={setShowClusters}
-                    showRoadQuality={showRoadQuality}
-                    onShowRoadQualityChange={setShowRoadQuality}
-                    limit={limit}
-                    onLimitChange={setLimit}
-                    onRefresh={fetchData}
-                    isLoading={isLoading}
-                    compact={true}
-                  />
-                </div>
-              </div>
-              <DataTable clusters={clusters} type="clusters" />
-            </div>
-          )}
-
-          {/* Road Quality Table View */}
-          {viewMode === 'roadQuality' && (
-            <div className="table-view-container">
-              <div className="view-header">
-                <div>
-                  <h2 className="view-title">Road Quality Segments</h2>
-                  <p className="view-subtitle">
-                    {roadSegments.length} segments analyzed • Average roughness: {quickStats.avgRoughness}
-                  </p>
-                </div>
-                <div className="view-actions">
-                  <Filters
-                    minConfidence={minConfidence}
-                    onMinConfidenceChange={setMinConfidence}
-                    showClusters={showClusters}
-                    onShowClustersChange={setShowClusters}
-                    showRoadQuality={showRoadQuality}
-                    onShowRoadQualityChange={setShowRoadQuality}
-                    limit={limit}
-                    onLimitChange={setLimit}
-                    onRefresh={fetchData}
-                    isLoading={isLoading}
-                    compact={true}
-                  />
-                </div>
-              </div>
-              <DataTable roadSegments={roadSegments} type="roadQuality" />
-            </div>
-          )}
-
-          {/* Analytics View */}
-          {viewMode === 'analytics' && (
-            <div className="analytics-view">
-              <div className="view-header">
-                <h2 className="view-title">Analytics & Insights</h2>
-                <p className="view-subtitle">Detailed analysis of road quality data</p>
-              </div>
-              <StatisticsPanel
-                clusters={clusters}
-                roadSegments={roadSegments}
-                isLoading={isLoading}
-                detailed={true}
-              />
-            </div>
-          )}
         </main>
       </div>
-    </div>
+    </ErrorBoundary>
   );
 }
-
-export default App;

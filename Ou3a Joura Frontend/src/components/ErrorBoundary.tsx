@@ -1,5 +1,5 @@
-import { Component, ErrorInfo, ReactNode } from 'react';
-import { AlertCircle } from 'lucide-react';
+// src/components/ErrorBoundary.tsx
+import { Component, ErrorInfo, ReactNode } from "react";
 
 interface Props {
   children: ReactNode;
@@ -7,71 +7,44 @@ interface Props {
 
 interface State {
   hasError: boolean;
-  error: Error | null;
+  message: string | null;
 }
 
-class ErrorBoundary extends Component<Props, State> {
-  public state: State = {
+export class ErrorBoundary extends Component<Props, State> {
+  state: State = {
     hasError: false,
-    error: null,
+    message: null,
   };
 
-  public static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
+  static getDerivedStateFromError(error: unknown): State {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 
-  public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error('Uncaught error:', error, errorInfo);
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("UI ErrorBoundary caught:", error, info);
   }
 
-  public render() {
+  render() {
     if (this.state.hasError) {
       return (
-        <div style={{
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'center',
-          height: '100vh',
-          padding: '2rem',
-          backgroundColor: '#f9fafb',
-        }}>
-          <AlertCircle size={48} color="#ef4444" style={{ marginBottom: '1rem' }} />
-          <h1 style={{ fontSize: '1.5rem', fontWeight: 'bold', marginBottom: '0.5rem', color: '#1f2937' }}>
-            Something went wrong
-          </h1>
-          <p style={{ color: '#6b7280', marginBottom: '1rem', textAlign: 'center' }}>
-            {this.state.error?.message || 'An unexpected error occurred'}
-          </p>
-          <button
-            onClick={() => window.location.reload()}
-            style={{
-              padding: '0.75rem 1.5rem',
-              backgroundColor: '#667eea',
-              color: 'white',
-              border: 'none',
-              borderRadius: '0.5rem',
-              cursor: 'pointer',
-              fontWeight: '500',
-            }}
-          >
-            Reload Page
-          </button>
-          <details style={{ marginTop: '1rem', maxWidth: '600px', width: '100%' }}>
-            <summary style={{ cursor: 'pointer', color: '#6b7280', marginBottom: '0.5rem' }}>
-              Error Details
-            </summary>
-            <pre style={{
-              backgroundColor: '#1f2937',
-              color: '#f9fafb',
-              padding: '1rem',
-              borderRadius: '0.5rem',
-              overflow: 'auto',
-              fontSize: '0.875rem',
-            }}>
-              {this.state.error?.stack}
-            </pre>
-          </details>
+        <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center">
+          <div className="max-w-md mx-auto p-6 border border-rose-800 bg-rose-950/40 rounded-2xl">
+            <h1 className="text-lg font-semibold mb-2">
+              Something went wrong in the dashboard
+            </h1>
+            <p className="text-sm text-slate-200 mb-3">
+              The frontend crashed while rendering. Check the console logs and
+              reload the page.
+            </p>
+            {this.state.message && (
+              <pre className="text-[11px] text-rose-200 bg-slate-950/60 p-2 rounded-md overflow-auto">
+                {this.state.message}
+              </pre>
+            )}
+          </div>
         </div>
       );
     }
@@ -79,6 +52,3 @@ class ErrorBoundary extends Component<Props, State> {
     return this.props.children;
   }
 }
-
-export default ErrorBoundary;
-
