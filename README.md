@@ -39,7 +39,6 @@ This repository contains three integrated components:
 * React + Leaflet map with cluster markers
 * Color-coded by likelihood (red=very_likely, orange=likely, yellow=uncertain)
 * Filter by likelihood category
-* Dashboard mode (shows only top 66th percentile by confidence)
 * Statistics panel with total clusters, average confidence, intensity, and stability
 * Sortable data table with all cluster metrics
 * Real-time updates from backend API
@@ -553,26 +552,17 @@ val url = URL("http://YOUR_IP:8000/api/v1/trips")
 
 ---
 
-## **Contributing**
-
-This project was developed as a final year engineering project for detecting road infrastructure issues in Lebanon using crowdsourced smartphone sensor data.
 
 **Team Members:**
 - Tarek Mourad
 - Karim Zarzour
 - Karim Hajj Ali
 
-**Institution:** Lebanese University, Faculty of Engineering
 
-**Year:** 2024-2025
 
 ---
 
-## **License**
 
-This project is open-source and available for educational and research purposes.
-
----
 
 ## **Future Enhancements**
 
@@ -581,6 +571,7 @@ This project is open-source and available for educational and research purposes.
 - [ ] iOS app version
 - [ ] Machine learning classification (pothole vs speed bump vs manhole)
 - [ ] Public API for third-party developers
+
 
 
 
