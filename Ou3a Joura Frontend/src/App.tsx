@@ -12,9 +12,18 @@ type ViewMode = "dashboard" | "all";
 
 function applyFilters(
   clusters: PotholeCluster[],
-  filters: FiltersState
+  filters: FiltersState,
+  viewMode: ViewMode
 ): PotholeCluster[] {
   return clusters.filter((c) => {
+    // In dashboard mode, automatically filter out uncertain clusters
+    if (viewMode === "dashboard") {
+      const likelihood = c.likelihood || "uncertain";
+      if (likelihood === "uncertain") {
+        return false;
+      }
+    }
+    
     if (filters.minConfidence > 0 && c.confidence < filters.minConfidence) {
       return false;
     }
@@ -113,8 +122,8 @@ export default function App() {
 
   // Derived: filtered clusters
   const filteredClusters = useMemo(
-    () => applyFilters(activeClusters, filters),
-    [activeClusters, filters]
+    () => applyFilters(activeClusters, filters, viewMode),
+    [activeClusters, filters, viewMode]
   );
 
 

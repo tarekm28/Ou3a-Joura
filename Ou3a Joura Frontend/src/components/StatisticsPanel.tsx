@@ -1,4 +1,5 @@
 // src/components/StatisticsPanel.tsx
+import { useMemo } from "react";
 import { PotholeCluster } from "../services/api";
 
 interface StatisticsPanelProps {
@@ -16,28 +17,57 @@ export function StatisticsPanel({
   loading,
   error,
 }: StatisticsPanelProps) {
-  const total = clusters.length;
-  const visible = filteredClusters.length;
+  // Deduplicate clusters by cluster_id (same logic as DataTable)
+  const uniqueClusters = useMemo(() => {
+    const seen = new Set<string>();
+    const out: PotholeCluster[] = [];
+    for (const c of clusters) {
+      if (!seen.has(c.cluster_id)) {
+        seen.add(c.cluster_id);
+        out.push(c);
+      }
+    }
+    return out;
+  }, [clusters]);
+
+  const uniqueFiltered = useMemo(() => {
+    const seen = new Set<string>();
+    const out: PotholeCluster[] = [];
+    for (const c of filteredClusters) {
+      if (!seen.has(c.cluster_id)) {
+        seen.add(c.cluster_id);
+        out.push(c);
+      }
+    }
+    return out;
+  }, [filteredClusters]);
+
+  // In dashboard mode, "total" should be the filtered set (no uncertain)
+  // In all mode, "total" is everything
+  const total = viewMode === "dashboard" ? uniqueFiltered.length : uniqueClusters.length;
+  const visible = uniqueFiltered.length;
 
   const byLikelihood = {
-    very_likely: clusters.filter((c) => c.likelihood === "very_likely").length,
-    likely: clusters.filter((c) => c.likelihood === "likely").length,
-    uncertain: clusters.filter((c) => c.likelihood === "uncertain" || !c.likelihood)
+    very_likely: uniqueFiltered.filter((c) => c.likelihood === "very_likely").length,
+    likely: uniqueFiltered.filter((c) => c.likelihood === "likely").length,
+    uncertain: uniqueFiltered.filter((c) => c.likelihood === "uncertain" || !c.likelihood)
       .length,
   };
 
   const avgConf =
-    clusters.length === 0
+    uniqueClusters.length === 0
       ? 0
-      : clusters.reduce((sum, c) => sum + c.confidence, 0) / clusters.length;
+      : uniqueClusters.reduce((sum, c) => sum + c.confidence, 0) / uniqueClusters.length;
 
   const avgPriority =
-    clusters.length === 0
+    uniqueClusters.length === 0
       ? 0
-      : clusters.reduce((sum, c) => sum + c.priority, 0) / clusters.length;
+      : uniqueClusters.reduce((sum, c) => sum + c.priority, 0) / uniqueClusters.length;
 
-  const fixed = clusters.filter((c) => c.status === "fixed").length;
-  const inProgress = clusters.filter((c) => c.status === "in_progress").length;
+
+
+  const fixed = uniqueClusters.filter((c) => c.status === "fixed").length;
+  const inProgress = uniqueClusters.filter((c) => c.status === "in_progress").length;
 
   return (
     <section className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4 flex flex-col gap-3">
@@ -73,7 +103,7 @@ export function StatisticsPanel({
             {avgConf.toFixed(3)}
           </div>
           <div className="text-[10px] text-slate-500">
-            Avg priority: {avgPriority.toFixed(3)}
+            Priority: {avgPriority.toFixed(3)}
           </div>
         </div>
 

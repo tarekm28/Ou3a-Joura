@@ -63,6 +63,7 @@ function MapManager({
           <div style="font-weight:600">Pothole cluster</div>
           <div>Confidence: ${c.confidence.toFixed(3)}</div>
           <div>Priority: ${c.priority.toFixed(3)}</div>
+          <div>Intensity: ${c.avg_intensity.toFixed(2)}</div>
           <div>Hits: ${c.hits}</div>
           <div>Users: ${c.users}</div>
           <div>Likelihood: ${c.likelihood ?? "n/a"}</div>

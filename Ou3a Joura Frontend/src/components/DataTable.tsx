@@ -11,7 +11,7 @@ interface DataTableProps {
   loading: boolean;
 }
 
-type SortKey = "id" | "confidence" | "priority" | "hits" | "users" | "likelihood" | "status";
+type SortKey = "id" | "confidence" | "priority" | "hits" | "users" | "avg_intensity" | "likelihood" | "status";
 
 export function DataTable({
   clusters,
@@ -92,6 +92,10 @@ export function DataTable({
         case "users":
           aVal = a.users;
           bVal = b.users;
+          break;
+        case "avg_intensity":
+          aVal = Number.isFinite(a.avg_intensity) ? a.avg_intensity : Number.NEGATIVE_INFINITY;
+          bVal = Number.isFinite(b.avg_intensity) ? b.avg_intensity : Number.NEGATIVE_INFINITY;
           break;
         case "likelihood":
           const order = { very_likely: 3, likely: 2, uncertain: 1, undefined: 0 };
@@ -201,6 +205,12 @@ export function DataTable({
                 Users <SortIcon column="users" />
               </th>
               <th 
+                className="px-2 py-1 text-right cursor-pointer hover:text-slate-300"
+                onClick={() => toggleSort("avg_intensity")}
+              >
+                Intensity <SortIcon column="avg_intensity" />
+              </th>
+              <th 
                 className="px-2 py-1 text-left cursor-pointer hover:text-slate-300"
                 onClick={() => toggleSort("likelihood")}
               >
@@ -246,6 +256,9 @@ export function DataTable({
                   </td>
                   <td className="px-2 py-1 text-right tabular-nums">{c.hits}</td>
                   <td className="px-2 py-1 text-right tabular-nums">{c.users}</td>
+                  <td className="px-2 py-1 text-right tabular-nums">
+                    {Number.isFinite(c.avg_intensity) ? c.avg_intensity.toFixed(2) : "—"}
+                  </td>
                   <td className="px-2 py-1 text-left">
                     {c.likelihood ?? "—"}
                   </td>
@@ -275,7 +288,7 @@ export function DataTable({
             {filtered.length === 0 && (
               <tr>
                 <td
-                  colSpan={7}
+                  colSpan={8}
                   className="px-2 py-4 text-center text-slate-500"
                 >
                   No clusters match these filters.

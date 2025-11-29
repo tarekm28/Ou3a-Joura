@@ -106,7 +106,10 @@ export function Filters({ filters, onChange, viewMode, maxHits = 20 }: FiltersPr
       <div className="flex flex-col gap-1">
         <p className="text-[11px] text-slate-300 mb-1">Likelihood buckets</p>
         <div className="flex flex-wrap gap-1">
-          {(["very_likely", "likely", "uncertain"] as const).map((l) => (
+          {(viewMode === "dashboard" 
+            ? ["very_likely", "likely"] as const
+            : ["very_likely", "likely", "uncertain"] as const
+          ).map((l) => (
             <button
               key={l}
               type="button"
@@ -122,7 +125,9 @@ export function Filters({ filters, onChange, viewMode, maxHits = 20 }: FiltersPr
           ))}
         </div>
         <p className="text-[10px] text-slate-500">
-          Leave all off to include every likelihood.
+          {viewMode === "dashboard" 
+            ? "Uncertain clusters hidden in high-priority view"
+            : "Leave all off to include every likelihood."}
         </p>
       </div>
 
