@@ -17,14 +17,12 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
     companion object {
         const val KEY_FILE_PATH = "file_path"
         const val KEY_API_URL = "api_url"
-        const val KEY_API_KEY = "api_key"
     }
 
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val path = inputData.getString(KEY_FILE_PATH) ?: return@withContext Result.failure()
-        val apiUrl = inputData.getString(KEY_API_URL) ?: return@withContext Result.failure()
-        val apiKey = inputData.getString(KEY_API_KEY) ?: return@withContext Result.failure()
+        val apiUrl = inputData.getString(KEY_API_URL) ?: "http://0.0.0.0:0/api/v1/trips"
         val file = File(path)
         if (!file.exists()) return@withContext Result.failure()
 
@@ -37,7 +35,6 @@ class UploadWorker(appContext: Context, params: WorkerParameters) : CoroutineWor
                 readTimeout = 30000
                 doOutput = true
                 setRequestProperty("Content-Type", "application/json")
-                setRequestProperty("X-API-Key", apiKey)
             }
 
 

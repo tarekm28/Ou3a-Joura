@@ -15,19 +15,12 @@ import android.location.Location
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
-import androidx.work.BackoffPolicy
-import androidx.work.Constraints
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import kotlin.math.abs
-import java.util.concurrent.TimeUnit
 
 class TripRecorderService : Service(), SensorEventListener {
 
@@ -103,28 +96,10 @@ class TripRecorderService : Service(), SensorEventListener {
         locationCb?.let { fused.removeLocationUpdates(it) }
         locationCb = null
 
-        val filePath = writer?.endTrip()
+        writer?.endTrip()
 
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
-
-        filePath?.let { path ->
-            val data = workDataOf(
-                UploadWorker.KEY_FILE_PATH to path,
-                UploadWorker.KEY_API_URL  to "http://192.168.7.149:8000/api/v1/trips",
-                UploadWorker.KEY_API_KEY  to "eYZwuw39ZDb7znBYDpAtn6OIruPSqi1T8AJDDd6ufwE"
-            )
-            val req = OneTimeWorkRequestBuilder<UploadWorker>()
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-                .setInputData(data)
-                .setConstraints(
-                    Constraints.Builder()
-                        .setRequiredNetworkType(NetworkType.CONNECTED)
-                        .build()
-                )
-                .build()
-            WorkManager.getInstance(this).enqueue(req)
-        }
     }
 
     private fun createChannel() {

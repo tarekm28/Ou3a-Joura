@@ -231,84 +231,23 @@ def _detect_potholes(df: pd.DataFrame) -> List[Dict[str, Any]]:
     return detections
 
 
-def _cluster_potholes_for_trip(
-    detections: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
-    """
-    Trip-level clustering: group detections into ~10m cells.
-    Aggregation across trips happens in the DB.
-    """
-    if not detections:
-        return []
-
-    df = pd.DataFrame(detections)
-    df = df.dropna(subset=["lat", "lon"])
-    if df.empty:
-        return []
-
-    cell_deg = 10.0 / 111_111.0
-    df["lat_cell"] = (df["lat"] / cell_deg).round().astype(int)
-    df["lon_cell"] = (df["lon"] / cell_deg).round().astype(int)
-
-    clusters: List[Dict[str, Any]] = []
-
-    for (lat_cell, lon_cell), g in df.groupby(["lat_cell", "lon_cell"]):
-        hits = len(g)
-        if hits == 0:
-            continue
-
-        lat_mean = float(g["lat"].mean())
-        lon_mean = float(g["lon"].mean())
-        last_ts = g["ts"].max()
-        avg_intensity = float(g["intensity"].mean())
-        avg_stability = float(g["stability"].mean())
-        mount_counts = g["mount_state"].value_counts().to_dict()
-        avg_conf = float(g["confidence"].mean())
-
-        exposure = float(hits)
-
-        cluster_key = f"{lat_cell}:{lon_cell}"
-        cluster_id = hashlib.sha1(cluster_key.encode("utf-8")).hexdigest()
-
-        priority = float(avg_intensity * (0.5 + 0.5 * avg_conf))
-
-        clusters.append(
-            {
-                "cluster_id": cluster_id,
-                "lat": lat_mean,
-                "lon": lon_mean,
-                "hits": hits,
-                "users": 1,
-                "last_ts": last_ts.to_pydatetime(),
-                "avg_intensity": avg_intensity,
-                "avg_stability": avg_stability,
-                "mount_state_counts": mount_counts,
-                "exposure": exposure,
-                "confidence": avg_conf,
-                "priority": priority,
-            }
-        )
-
-    return clusters
-
-
 
 def process_trip_payload(
     payload: Dict[str, Any]
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+) -> List[Dict[str, Any]]:
     """
     Main entrypoint.
 
     Input:  payload (trip JSON from the app)
-    Output: (detections, pothole_clusters_for_this_trip)
+    Output: detections list
     """
     samples = payload.get("samples") or []
     if not samples:
-        return [], [], []
+        return []
 
     df = pd.DataFrame(samples)
     if df.empty:
-        return [], [], []
+        return []
 
     df["ts"] = _to_datetime_series(df, payload)
     df = df.dropna(subset=["ts"])
@@ -319,6 +258,5 @@ def process_trip_payload(
     _compute_zscore(df)
 
     detections = _detect_potholes(df)
-    clusters = _cluster_potholes_for_trip(detections)
 
-    return detections, clusters
+    return detections

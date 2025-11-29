@@ -10,14 +10,7 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
-import androidx.work.BackoffPolicy
-import androidx.work.Constraints
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
 import java.io.File
-import java.time.Duration
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -34,11 +27,7 @@ class MainActivity : AppCompatActivity() {
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) {
-        updateButtons()
-        // After permissions are granted, try to enqueue any pending offline trips
-        enqueuePendingUploads()
-    }
+    ) { }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,13 +94,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         tvPath.text = getExternalFilesDir("trips")?.absolutePath ?: ""
-        updateButtons()
-
-        // ⬇️ Also scan on app start (will be a no-op if no files / no network yet)
-        enqueuePendingUploads()
     }
-
-    private fun updateButtons() { /* no-op for now */ }
 
     private fun ensurePermissions(): Boolean {
         val needed = mutableListOf(
@@ -129,30 +112,7 @@ class MainActivity : AppCompatActivity() {
         } else true
     }
 
-    // scan trips folder and enqueue uploads for any .json files
-    private fun enqueuePendingUploads() {
-        val tripsDir = getExternalFilesDir("trips") ?: return
-        // Only consider files directly in /trips, not in subfolders (e.g., /trips/uploaded)
-        val files = tripsDir.listFiles { f ->
-            f.isFile && f.parentFile == tripsDir && f.extension.equals("json", true)
-        } ?: return
 
-        files.forEach { file ->
-            val data = workDataOf(
-                UploadWorker.KEY_FILE_PATH to file.absolutePath,
-                UploadWorker.KEY_API_URL  to "http://192.168.1.114:8000/api/v1/trips",
-                UploadWorker.KEY_API_KEY  to "eYZwuw39ZDb7znBYDpAtn6OIruPSqi1T8AJDDd6ufwE"
-            )
-            val req = OneTimeWorkRequestBuilder<UploadWorker>()
-                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, Duration.ofSeconds(30))
-                .setInputData(data)
-                .setConstraints(
-                    Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-                )
-                .build()
-            WorkManager.getInstance(this).enqueue(req)
-        }
-    }
 
     private fun uploadTripsDirectly(files: List<File>) {
         CoroutineScope(Dispatchers.IO).launch {
@@ -162,14 +122,13 @@ class MainActivity : AppCompatActivity() {
 
             files.forEach { file ->
                 try {
-                    val url = URL("http://192.168.1.114:8000/api/v1/trips")
+                    val url = URL("http://0.0.0.0:0/api/v1/trips")
                     val conn = (url.openConnection() as HttpURLConnection).apply {
                         requestMethod = "POST"
                         connectTimeout = 15000
                         readTimeout = 30000
                         doOutput = true
                         setRequestProperty("Content-Type", "application/json")
-                        setRequestProperty("X-API-Key", "eYZwuw39ZDb7znBYDpAtn6OIruPSqi1T8AJDDd6ufwE")
                     }
 
                     FileInputStream(file).use { fis ->

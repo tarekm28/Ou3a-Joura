@@ -16,7 +16,7 @@ async def run_trip_processing(
 
     Pothole clusters are computed on the fly in /api/v1/clusters.
     """
-    detections, _clusters_unused = process_trip_payload(payload)
+    detections = process_trip_payload(payload)
 
     if pool is None:
         return
