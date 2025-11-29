@@ -97,6 +97,19 @@ This repository contains three integrated components:
 │  - Nginx reverse proxy (/api/* → backend)                      │
 └─────────────────────────────────────────────────────────────────┘
 ```
+---
+
+# **🌐 Live Demo**
+
+The application is currently hosted and accessible at:
+
+### **[http://46.224.80.70](http://46.224.80.70)**
+
+This live deployment runs on a Hetzner Cloud server with:
+- PostgreSQL 16 database
+- FastAPI backend processing engine
+- React frontend dashboard
+- Real trip data from Lebanon
 
 ---
 
@@ -571,6 +584,7 @@ val url = URL("http://YOUR_IP:8000/api/v1/trips")
 - [ ] iOS app version
 - [ ] Machine learning classification (pothole vs speed bump vs manhole)
 - [ ] Public API for third-party developers
+
 
 
 
