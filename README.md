@@ -558,7 +558,9 @@ val url = URL("http://YOUR_IP:8000/api/v1/trips")
 This project was developed as a final year engineering project for detecting road infrastructure issues in Lebanon using crowdsourced smartphone sensor data.
 
 **Team Members:**
-- Tarek Mourad - Full-stack development
+- Tarek Mourad
+- Karim Zarzour
+- Karim Hajj Ali
 
 **Institution:** Lebanese University, Faculty of Engineering
 
@@ -574,26 +576,12 @@ This project is open-source and available for educational and research purposes.
 
 ## **Future Enhancements**
 
-- [ ] Multi-language support (Arabic, French)
 - [ ] Heat map overlay for intensity visualization
-- [ ] Historical timeline view (cluster evolution over time)
 - [ ] Government agency dashboard with export to CSV/Excel
-- [ ] SMS/push notifications for new high-priority potholes
 - [ ] iOS app version
 - [ ] Machine learning classification (pothole vs speed bump vs manhole)
-- [ ] Integration with municipal maintenance tracking systems
 - [ ] Public API for third-party developers
-- [ ] Real-time WebSocket updates
 
----
 
-## **Contact**
 
-For questions or collaboration opportunities:
-- GitHub: [@tarekm28](https://github.com/tarekm28)
-- Repository: [Ou3a-Joura](https://github.com/tarekm28/Ou3a-Joura)
-
----
-
-**Made with ❤️ for better roads in Lebanon**
 
