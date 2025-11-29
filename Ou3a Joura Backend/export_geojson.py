@@ -6,52 +6,35 @@ import requests
 
 
 BACKEND_URL = "http://localhost:8000"
-
 OUT_DIR = Path(".")
 
-# new filenames for potholes
+# output filenames
 NEW_ALL_FILE = OUT_DIR / "new_all.geojson"
 NEW_DASHBOARD_FILE = OUT_DIR / "new_dashboard.geojson"
-
-# keep rough roads file name as before
-ROUGH_ROADS_FILE = OUT_DIR / "rough_roads.geojson"
-
+NEW_DETECTIONS_FILE = OUT_DIR / "new_detections.geojson" 
 # quantile for dashboard selection among non-uncertain clusters
 DASHBOARD_QUANTILE = 0.6
 
 
 def fetch_clusters(min_conf: float = 0.0, limit: int = 1000):
-    """
-    Fetch pothole clusters from the backend.
-
-    We now ignore the backend's 'dashboard' flag and always fetch the full set,
-    then apply our own quantile-based selection on top of the existing
-    'likelihood' field.
-    """
-    params = {
-        "min_conf": min_conf,
-        "limit": limit,
-    }
+    params = {"min_conf": min_conf, "limit": limit}
     resp = requests.get(f"{BACKEND_URL}/api/v1/clusters", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
-def fetch_rough_roads(min_conf: float = 0.0, limit: int = 1000):
-    """Fetch rough road segments from the backend."""
-    params = {
-        "min_conf": min_conf,
-        "limit": limit,
-    }
-    resp = requests.get(f"{BACKEND_URL}/api/v1/road_quality", params=params, timeout=30)
+def fetch_detections(min_intensity: float = 0.0, limit: int = 5000):
+    """
+    Fetch raw suspicious detections (pre-clustering).
+    Requires /api/v1/detections endpoint.
+    """
+    params = {"min_intensity": min_intensity, "limit": limit}
+    resp = requests.get(f"{BACKEND_URL}/api/v1/detections", params=params, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
 
 def percentile(values, q: float) -> float:
-    """
-    Simple percentile implementation (q in [0,1]) without numpy.
-    """
     if not values:
         raise ValueError("Cannot compute percentile of empty list")
     vals = sorted(values)
@@ -68,7 +51,6 @@ def percentile(values, q: float) -> float:
 
 
 def clusters_to_geojson(clusters):
-    """Convert list of cluster dicts to a GeoJSON FeatureCollection."""
     features = []
     for c in clusters:
         lat = c.get("latitude")
@@ -87,78 +69,66 @@ def clusters_to_geojson(clusters):
             "avg_stability": c.get("avg_stability"),
             "exposure": c.get("exposure"),
             "last_ts": c.get("last_ts"),
-            # new: export whether this cluster is in the dashboard subset
             "is_dashboard": c.get("is_dashboard", False),
         }
 
         features.append(
             {
                 "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [lon, lat],
-                },
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 "properties": props,
             }
         )
 
-    return {
-        "type": "FeatureCollection",
-        "features": features,
-    }
+    return {"type": "FeatureCollection", "features": features}
 
 
-def rough_roads_to_geojson(segments):
+def detections_to_geojson(detections):
     """
-    Convert rough road segments to GeoJSON points.
-
-    Each segment is currently a "representative" location with a roughness score.
+    Convert raw detections to GeoJSON points.
+    Each point = one suspicious spike pre-clustering.
     """
     features = []
-    for s in segments:
-        lat = s.get("latitude")
-        lon = s.get("longitude")
+    for d in detections:
+        lat = d.get("latitude") or d.get("lat")
+        lon = d.get("longitude") or d.get("lon")
         if lat is None or lon is None:
             continue
 
         props = {
-            "segment_id": s.get("segment_id"),
-            "roughness": s.get("roughness"),
-            "rough_windows": s.get("rough_windows"),
-            "trips": s.get("trips"),
-            "confidence": s.get("confidence"),
-            "last_ts": s.get("last_ts"),
+            "trip_id": d.get("trip_id"),
+            "ts": d.get("ts"),
+            "intensity": d.get("intensity"),
+            "stability": d.get("stability"),
+            "mount_state": d.get("mount_state"),
         }
 
         features.append(
             {
                 "type": "Feature",
-                "geometry": {
-                    "type": "Point",
-                    "coordinates": [lon, lat],
-                },
+                "geometry": {"type": "Point", "coordinates": [lon, lat]},
                 "properties": props,
             }
         )
 
-    return {
-        "type": "FeatureCollection",
-        "features": features,
-    }
+    return {"type": "FeatureCollection", "features": features}
+
 
 
 def main():
-    # --- pothole clusters ---
+    # --- raw detections (pre clustering) ---
+    print("Fetching RAW detections (pre-clustering spikes)...")
+    detections_all = fetch_detections(min_intensity=0.0, limit=20000)
+    print(f"  got {len(detections_all)} detections")
 
+    # --- pothole clusters ---
     print("Fetching ALL clusters (no confidence cut, for debugging + dashboard selection)...")
     clusters_all = fetch_clusters(min_conf=0.0, limit=5000)
     print(f"  got {len(clusters_all)} clusters")
 
-    # mark all as non-dashboard by default
     for c in clusters_all:
         c["is_dashboard"] = False
 
-    # build candidate pool: exclude 'uncertain' likelihood
     candidates = [c for c in clusters_all if c.get("likelihood") != "uncertain"]
 
     if candidates:
@@ -169,40 +139,30 @@ def main():
             f"{DASHBOARD_QUANTILE*100:.0f}th percentile of confidence = {conf_thresh:.3f}"
         )
 
-        # mark dashboard clusters
         for c in candidates:
-            conf = float(c.get("confidence", 0.0))
-            if conf >= conf_thresh:
+            if float(c.get("confidence", 0.0)) >= conf_thresh:
                 c["is_dashboard"] = True
     else:
-        conf_thresh = None
         print("No non-uncertain clusters → dashboard will be empty.")
 
-    # split into all vs dashboard subsets
     clusters_dashboard = [c for c in clusters_all if c.get("is_dashboard")]
-
     print(f"  dashboard clusters after quantile cut: {len(clusters_dashboard)}")
 
-    # --- rough roads ---
-
-    print("Fetching rough road segments...")
-    rough_segments = fetch_rough_roads(min_conf=0.0, limit=5000)
-    print(f"  got {len(rough_segments)} rough road segments")
 
     # Convert to GeoJSON
+    detections_geojson = detections_to_geojson(detections_all)
     potholes_all_geojson = clusters_to_geojson(clusters_all)
     potholes_dash_geojson = clusters_to_geojson(clusters_dashboard)
-    rough_roads_geojson = rough_roads_to_geojson(rough_segments)
 
-    # Save (in current directory)
+    # Save
+    NEW_DETECTIONS_FILE.write_text(json.dumps(detections_geojson, indent=2), encoding="utf-8")
     NEW_ALL_FILE.write_text(json.dumps(potholes_all_geojson, indent=2), encoding="utf-8")
     NEW_DASHBOARD_FILE.write_text(json.dumps(potholes_dash_geojson, indent=2), encoding="utf-8")
-    ROUGH_ROADS_FILE.write_text(json.dumps(rough_roads_geojson, indent=2), encoding="utf-8")
 
+    print(f"Saved RAW detections to:      {NEW_DETECTIONS_FILE}")
     print(f"Saved ALL clusters to:        {NEW_ALL_FILE}")
     print(f"Saved DASHBOARD clusters to:  {NEW_DASHBOARD_FILE}")
-    print(f"Saved rough roads to:         {ROUGH_ROADS_FILE}")
-    print("Now open these .geojson files in a map viewer (geojson.io, QGIS, etc.).")
+    print("Open these in geojson.io or QGIS.")
 
 
 if __name__ == "__main__":

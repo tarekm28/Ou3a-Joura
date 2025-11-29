@@ -292,57 +292,6 @@ def _cluster_potholes_for_trip(
     return clusters
 
 
-def _compute_rough_segments(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """
-    Branch B: road roughness segments (low quality stretches).
-    Uses only stable windows and z-score RMS in ~40m cells.
-    """
-    segments: List[Dict[str, Any]] = []
-
-    if df.empty:
-        return segments
-
-    df_geo = df.dropna(subset=["lat", "lon"]).copy()
-    if df_geo.empty:
-        return segments
-
-    df_geo = df_geo[df_geo["stability"] <= 0.4]
-    if df_geo.empty:
-        return segments
-
-    cell_deg = 40.0 / 111_111.0
-    df_geo["lat_cell"] = (df_geo["lat"] / cell_deg).round().astype(int)
-    df_geo["lon_cell"] = (df_geo["lon"] / cell_deg).round().astype(int)
-
-    for (lat_cell, lon_cell), g in df_geo.groupby(["lat_cell", "lon_cell"]):
-        if len(g) < 10:
-            continue
-
-        z_vals = g["z"].replace([np.inf, -np.inf], np.nan).dropna()
-        if z_vals.empty:
-            continue
-
-        roughness = float(np.sqrt(np.mean(z_vals ** 2)))
-        lat_mean = float(g["lat"].mean())
-        lon_mean = float(g["lon"].mean())
-        last_ts = g["ts"].max().to_pydatetime()
-
-        segment_key = f"{lat_cell}:{lon_cell}"
-        segment_id = hashlib.sha1(segment_key.encode("utf-8")).hexdigest()
-
-        segments.append(
-            {
-                "segment_id": segment_id,
-                "lat": lat_mean,
-                "lon": lon_mean,
-                "roughness": roughness,
-                "rough_windows": int(len(z_vals)),
-                "last_ts": last_ts,
-            }
-        )
-
-    return segments
-
 
 def process_trip_payload(
     payload: Dict[str, Any]
@@ -351,7 +300,7 @@ def process_trip_payload(
     Main entrypoint.
 
     Input:  payload (trip JSON from the app)
-    Output: (detections, pothole_clusters_for_this_trip, rough_segments_for_this_trip)
+    Output: (detections, pothole_clusters_for_this_trip)
     """
     samples = payload.get("samples") or []
     if not samples:
@@ -371,6 +320,5 @@ def process_trip_payload(
 
     detections = _detect_potholes(df)
     clusters = _cluster_potholes_for_trip(detections)
-    rough_segments = _compute_rough_segments(df)
 
-    return detections, clusters, rough_segments
+    return detections, clusters

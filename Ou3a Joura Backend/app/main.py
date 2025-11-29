@@ -168,7 +168,7 @@ async def upload_trip(
                 json.dumps(payload),
             )
 
-    # detection + roughness go to background
+    # detection go to background
     background_tasks.add_task(run_trip_processing, pool, trip.trip_id, payload)
 
     return {"status": "accepted", "trip_id": trip.trip_id}
@@ -453,14 +453,20 @@ async def get_clusters(
     return filtered
 
 
-# Road roughness endpoint
+# ---------------------------------------------------------------------
+# Raw detections endpoint (pre-clustering evidence)
+# ---------------------------------------------------------------------
 
-@app.get("/api/v1/road_quality")
-async def get_road_quality(
-    request: Request,
-    min_conf: float = 0.4,
-    limit: int = 1000,
+@app.get("/api/v1/detections")
+async def get_detections(
+    min_intensity: float = 0.0,
+    min_conf: float = 0.0,   # optional, if you ever add confidence to detections
+    limit: int = 5000,
 ) -> List[Dict[str, Any]]:
+    """
+    Return raw suspicious detections from ALL trips.
+    These are per-event spikes before spatial clustering.
+    """
     global pool
     if pool is None:
         raise HTTPException(status_code=500, detail="DB pool not initialized")
@@ -468,21 +474,24 @@ async def get_road_quality(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT segment_id,
-                   latitude,
-                   longitude,
-                   roughness,
-                   rough_windows,
-                   trips,
-                   last_ts,
-                   confidence
-            FROM road_quality_segments
-            WHERE confidence >= $1
-            ORDER BY confidence DESC, roughness DESC
+            SELECT
+                trip_id,
+                ts,
+                latitude,
+                longitude,
+                intensity,
+                stability,
+                mount_state
+            FROM detections
+            WHERE latitude IS NOT NULL
+              AND longitude IS NOT NULL
+              AND intensity >= $1
+            ORDER BY ts DESC
             LIMIT $2
             """,
-            min_conf,
+            min_intensity,
             limit,
         )
 
     return [dict(r) for r in rows]
+

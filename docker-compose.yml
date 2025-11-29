@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ouaa
+      POSTGRES_PASSWORD: ouaa
+      POSTGRES_DB: ouaa
+    ports:
+      - "5432:5432"
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+      - ./Ou3a Joura Backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - ouaa-network
+
+  backend:
+    build: ./Ou3a Joura Backend
+    environment:
+      DATABASE_URL: "postgresql://ouaa:ouaa@db:5432/ouaa"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    networks:
+      - ouaa-network
+
+  frontend:
+    build: ./Ou3a Joura Frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    networks:
+      - ouaa-network
+
+volumes:
+  dbdata:
+
+networks:
+  ouaa-network:
+    driver: bridge

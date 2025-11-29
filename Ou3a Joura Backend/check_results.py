@@ -17,9 +17,5 @@ def main():
     if clusters:
         print("Sample cluster:", clusters[0])
 
-    print(f"Rough road segments: {len(segments)}")
-    if segments:
-        print("Sample rough segment:", segments[0])
-
 if __name__ == "__main__":
     main()
